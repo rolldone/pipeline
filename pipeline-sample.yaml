@@ -1,0 +1,26 @@
+project_name: "my-pipeline-project"
+localPath: "."
+
+devsync:
+  os_target: "linux"
+  auth:
+    username: "user"
+    host: "localhost"
+    port: 22
+    remotePath: "/tmp"
+    privateKey: ""  # Empty means no key validation
+  ignores: []
+  agent_watchs: []
+  manual_transfer: []
+  script: {}
+  trigger_permission: {}
+
+direct_access:
+  pipeline_dir: "./pipelines"
+  executions:
+    - name: "Example Pipeline"
+      key: "example"
+      pipeline: "example-pipeline.yaml"
+      hosts: []
+      variables: {}
+  ssh_configs: []
