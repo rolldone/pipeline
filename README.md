@@ -46,6 +46,54 @@ pipeline
 
 Select from available pipeline executions and SSH connections using arrow keys.
 
+## Configuration
+
+Pipeline uses a `pipeline.yaml` configuration file. You can specify a custom config file:
+
+```bash
+pipeline --config custom.yaml list
+```
+
+### Config Structure
+
+```yaml
+project_name: my-project
+
+var:
+  auth:
+    username: user
+    host: example.com
+    port: 22
+    remotePath: /home/user
+
+direct_access:
+  pipeline_dir: ./pipelines
+  executions:
+    - name: "Deploy to Production"
+      key: "prod-deploy"
+      pipeline: "deploy.yaml"
+      hosts: ["prod-server"]
+      variables: {}
+  ssh_configs:
+    - Host: prod-server
+      HostName: =var.auth.host
+      User: =var.auth.username
+      Port: =var.auth.port
+      IdentityFile: ~/.ssh/id_rsa
+  ssh_commands:
+    - access_name: "Production Server"
+      command: "ssh prod-server"
+    - access_name: "Database Server"
+      command: "ssh db-server"
+```
+
+### Configuration Sections
+
+- **`var`**: Template variables for reuse across config
+- **`direct_access.executions`**: Pipeline execution definitions
+- **`direct_access.ssh_configs`**: SSH connection configurations
+- **`direct_access.ssh_commands`**: Direct SSH access commands (shown in menu)
+
 ## Usage
 
 ```bash
@@ -287,7 +335,7 @@ steps:
     commands: ["docker build -t myapp:{{commit_sha}} ."]
 ```
 
-## File Template Rendering
+### File Template Rendering
 
 `file_transfer` steps with `template: "enabled"` render files with variable substitution before upload:
 
@@ -326,6 +374,72 @@ Behavior:
 - Per-file `template` overrides step-level `template` setting.
 - If multiple files are specified, `destination` must be a directory (ending with `/` or already a directory) — otherwise the step will error.
 - Backward compatibility: if `files` is not provided, `source` / `sources` will work as before.
+
+## Running Pipelines
+
+```bash
+# List available executions
+pipeline list
+
+# Run specific execution
+pipeline run dev
+pipeline run prod
+
+# Override variables via CLI
+pipeline run prod --var DOCKER_TAG=v1.2.3
+pipeline run dev --var DOCKER_TAG=dev-test --var BUILD_ENV=development
+
+# Dynamic variables for CI/CD
+pipeline run prod --var DOCKER_TAG=$(git rev-parse --short HEAD)
+pipeline run dev --var DOCKER_TAG=dev-$(date +%Y%m%d-%H%M%S)
+```
+
+## Real-time Output Streaming
+
+Pipeline displays command output in real-time during execution, providing full visibility into the progress of running commands:
+
+```
+▶️  EXECUTING JOB: deploy (HEAD)
+📋 Executing step: ping-check
+Running on 100.96.182.47: ping -c 3 google.com
+Command output: PING google.com (216.239.38.120) 56(84) bytes of data.
+Command output: 64 bytes from any-in-2678.1e100.net (216.239.38.120): icmp_seq=1 ttl=128 time=30.0 ms
+Command output: 64 bytes from any-in-2678.1e100.net (216.239.38.120): icmp_seq=2 ttl=128 time=30.8 ms
+Command output: 64 bytes from any-in-2678.1e100.net (216.239.38.120): icmp_seq=3 ttl=128 time=31.1 ms
+Command output:
+Command output: --- google.com ping statistics ---
+Command output: 3 packets transmitted, 3 received, 0% packet loss, time 1998ms
+📋 Executing step: deploy-app
+Running on 100.96.182.47: docker-compose up -d
+Command output: Creating network "myapp_default" with the default driver
+Command output: Creating myapp_web_1 ... done
+Command output: Creating myapp_db_1 ... done
+✅ Completed job: deploy
+```
+
+### Silent Mode for Clean Output
+For verbose commands, use `silent: true` to suppress real-time output and display results at the end only:
+
+```yaml
+steps:
+  - name: "verbose-command"
+    type: "command"
+    commands: ["ping -c 10 google.com"]
+    silent: true
+    save_output: "ping_result"
+
+  - name: "display-result"
+    type: "command"
+    commands: ["echo 'Ping completed: {{ping_result}}'"]
+```
+
+### Job Execution Tracking
+
+Pipeline displays execution progress with visual indicators:
+- **▶️ EXECUTING JOB: [name] (HEAD)**: Job currently executing
+- **📋 Executing step: [name]**: Step running in job
+- **✅ Completed job: [name]**: Job completed successfully
+- **❌ Failed job: [name]**: Job failed
 
 ## Pipeline Logging
 
@@ -472,183 +586,6 @@ curl -X POST https://slack.com/api/files.upload \
 - **Clean**: ANSI escape codes automatically stripped
 - **Comprehensive**: Captures all stdout/stderr output
 - **Persistent**: Doesn't disappear after pipeline completion
-- **🔗 SSH Connections** - Direct SSH access to configured servers
-- **📝 Create Pipeline** - Generate new pipeline templates
-- **📋 List Pipelines** - Show available executions
-- **ℹ️ Show Info** - Display debugging information
-- **🔄 Reload Config** - Refresh configuration
-- **🚪 Exit** - Close menu
-
-### pipeline init
-
-Initialize default pipeline configuration in the current directory.
-
-```bash
-pipeline init
-```
-
-Creates `pipeline.yaml` and `pipelines/` directory for a new pipeline project.
-
-### pipeline run [execution_key]
-
-Run a pipeline execution by its key.
-
-```bash
-pipeline run my-execution
-```
-
-Options:
-- `--var key=value`: Override variables
-
-### pipeline list
-
-List all available pipeline executions.
-
-```bash
-pipeline list
-```
-
-### pipeline create [name]
-
-Create a new pipeline template.
-
-```bash
-pipeline create my-pipeline
-```
-
-### pipeline info
-
-Display pipeline information for debugging.
-
-```bash
-pipeline info
-```
-
-### pipeline menu
-
-Launch the interactive menu explicitly (same as running `pipeline` without arguments).
-
-```bash
-pipeline menu
-```
-
-## Configuration
-
-Pipeline uses a `pipeline.yaml` configuration file. You can specify a custom config file:
-
-```bash
-pipeline --config custom.yaml list
-```
-
-### Config Structure
-
-```yaml
-project_name: my-project
-
-var:
-  auth:
-    username: user
-    host: example.com
-    port: 22
-    remotePath: /home/user
-
-direct_access:
-  pipeline_dir: ./pipelines
-  executions:
-    - name: "Deploy to Production"
-      key: "prod-deploy"
-      pipeline: "deploy.yaml"
-      hosts: ["prod-server"]
-      variables: {}
-  ssh_configs:
-    - Host: prod-server
-      HostName: =var.auth.host
-      User: =var.auth.username
-      Port: =var.auth.port
-      IdentityFile: ~/.ssh/id_rsa
-  ssh_commands:
-    - access_name: "Production Server"
-      command: "ssh prod-server"
-    - access_name: "Database Server"
-      command: "ssh db-server"
-```
-
-### Configuration Sections
-
-- **`var`**: Template variables for reuse across config
-- **`direct_access.executions`**: Pipeline execution definitions
-- **`direct_access.ssh_configs`**: SSH connection configurations
-- **`direct_access.ssh_commands`**: Direct SSH access commands (shown in menu)
-
-## Pipeline Format
-
-Pipelines are defined in YAML files. See `job-sample.yaml` for a complete example.
-
-## Running Pipelines
-
-```bash
-# List available executions
-pipeline list
-
-# Run specific execution
-pipeline run dev
-pipeline run prod
-
-# Override variables via CLI
-pipeline run prod --var DOCKER_TAG=v1.2.3
-pipeline run dev --var DOCKER_TAG=dev-test --var BUILD_ENV=development
-
-# Dynamic variables for CI/CD
-pipeline run prod --var DOCKER_TAG=$(git rev-parse --short HEAD)
-pipeline run dev --var DOCKER_TAG=dev-$(date +%Y%m%d-%H%M%S)
-```
-
-## Real-time Output Streaming
-
-Pipeline displays command output in real-time during execution, providing full visibility into the progress of running commands:
-
-```
-▶️  EXECUTING JOB: deploy (HEAD)
-📋 Executing step: ping-check
-Running on 100.96.182.47: ping -c 3 google.com
-Command output: PING google.com (216.239.38.120) 56(84) bytes of data.
-Command output: 64 bytes from any-in-2678.1e100.net (216.239.38.120): icmp_seq=1 ttl=128 time=30.0 ms
-Command output: 64 bytes from any-in-2678.1e100.net (216.239.38.120): icmp_seq=2 ttl=128 time=30.8 ms
-Command output: 64 bytes from any-in-2678.1e100.net (216.239.38.120): icmp_seq=3 ttl=128 time=31.1 ms
-Command output:
-Command output: --- google.com ping statistics ---
-Command output: 3 packets transmitted, 3 received, 0% packet loss, time 1998ms
-📋 Executing step: deploy-app
-Running on 100.96.182.47: docker-compose up -d
-Command output: Creating network "myapp_default" with the default driver
-Command output: Creating myapp_web_1 ... done
-Command output: Creating myapp_db_1 ... done
-✅ Completed job: deploy
-```
-
-### Silent Mode for Clean Output
-For verbose commands, use `silent: true` to suppress real-time output and display results at the end only:
-
-```yaml
-steps:
-  - name: "verbose-command"
-    type: "command"
-    commands: ["ping -c 10 google.com"]
-    silent: true
-    save_output: "ping_result"
-
-  - name: "display-result"
-    type: "command"
-    commands: ["echo 'Ping completed: {{ping_result}}'"]
-```
-
-### Job Execution Tracking
-
-Pipeline displays execution progress with visual indicators:
-- **▶️ EXECUTING JOB: [name] (HEAD)**: Job currently executing
-- **📋 Executing step: [name]**: Step running in job
-- **✅ Completed job: [name]**: Job completed successfully
-- **❌ Failed job: [name]**: Job failed
 
 ## Variable System
 
@@ -714,7 +651,7 @@ executions:
     hosts: ["localhost"]
 ```
 
-## Variable Priority
+### Variable Priority
 
 Variables are merged with the following priority:
 
@@ -724,7 +661,7 @@ Variables are merged with the following priority:
 4. **Global pipeline.variables** - **Low**
 5. **Runtime variables** (save_output) - **Lowest**
 
-## Variable Interpolation
+### Variable Interpolation
 
 Use format `{{VAR_NAME}}` in commands:
 
@@ -740,7 +677,7 @@ steps:
     commands: ["echo 'Deploying image {{image_id}}'"]
 ```
 
-### Fields Supporting Variable Interpolation
+#### Fields Supporting Variable Interpolation
 
 Variable interpolation with format `{{VAR_NAME}}` is supported in:
 
@@ -844,60 +781,3 @@ steps:
 - `else_action`: Action if no conditions match
 - `else_step`: Target step for `goto_step`
 - `else_job`: Target job for `goto_job`
-
-## Configuration
-
-Pipeline uses a `pipeline.yaml` configuration file. You can specify a custom config file:
-
-```bash
-pipeline --config custom.yaml list
-```
-
-### Config Structure
-
-```yaml
-project_name: my-project
-
-var:
-  auth:
-    username: user
-    host: example.com
-    port: 22
-    remotePath: /home/user
-
-direct_access:
-  pipeline_dir: ./pipelines
-  executions:
-    - name: "Deploy to Production"
-      key: "prod-deploy"
-      pipeline: "deploy.yaml"
-      hosts: ["prod-server"]
-      variables: {}
-  ssh_configs:
-    - Host: prod-server
-      HostName: =var.auth.host
-      User: =var.auth.username
-      Port: =var.auth.port
-      IdentityFile: ~/.ssh/id_rsa
-  ssh_commands:
-    - access_name: "Production Server"
-      command: "ssh prod-server"
-    - access_name: "Database Server"
-      command: "ssh db-server"
-```
-
-### Configuration Sections
-
-- **`var`**: Template variables for reuse across config
-- **`direct_access.executions`**: Pipeline execution definitions
-- **`direct_access.ssh_configs`**: SSH connection configurations
-- **`direct_access.ssh_commands`**: Direct SSH access commands (shown in menu)
-
-Pipelines are stored in the configured directory:
-
-```yaml
-direct_access:
-  pipeline_dir: "./pipelines"  # Default location
-```
-
-**⚠️ Reserved Names**: Do not use `vars` or `scripts` as pipeline names.
