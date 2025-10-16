@@ -3,16 +3,19 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
-	"github.com/spf13/cobra"
-	"gopkg.in/yaml.v3"
 	"pipeline/internal/config"
 	"pipeline/internal/pipeline/executor"
 	"pipeline/internal/pipeline/parser"
 	"pipeline/internal/pipeline/types"
 	"pipeline/internal/util"
+
+	"github.com/manifoldco/promptui"
+	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 )
 
 var (
@@ -21,6 +24,9 @@ var (
 		Use:   "pipeline",
 		Short: "Pipeline execution tool",
 		Long:  `Standalone pipeline execution tool`,
+		Run: func(cmd *cobra.Command, args []string) {
+			showPipelineMenu()
+		},
 	}
 )
 
@@ -31,6 +37,7 @@ func init() {
 	rootCmd.AddCommand(newPipelineCreateCmd())
 	rootCmd.AddCommand(newPipelineInitCmd())
 	rootCmd.AddCommand(newPipelineInfoCmd())
+	rootCmd.AddCommand(newPipelineMenuCmd())
 }
 
 func Execute() error {
@@ -328,6 +335,170 @@ func runPipelineInit() {
 	fmt.Printf("   - Use 'pipeline run <key>' to execute pipelines\n")
 }
 
+// showPipelineMenu displays an interactive menu for pipeline operations
+func showPipelineMenu() {
+	for {
+		// Load config for menu options
+		cfg, err := config.LoadAndRenderConfigForPipeline()
+		if err != nil {
+			fmt.Printf("❌ Failed to load config: %v\n", err)
+			fmt.Printf("💡 Run 'pipeline init' to create default configuration\n")
+			return
+		}
+
+		// Create menu items from executions
+		var items []string
+		for _, exec := range cfg.DirectAccess.Executions {
+			items = append(items, fmt.Sprintf("▶️  %s (%s)", exec.Name, exec.Key))
+		}
+
+		// Add SSH commands
+		for _, sshCmd := range cfg.DirectAccess.SSHCommands {
+			items = append(items, fmt.Sprintf("🔗 %s", sshCmd.AccessName))
+		}
+
+		// Add static menu items
+		items = append(items, "📝 Create Pipeline")
+		items = append(items, "📋 List Pipelines")
+		items = append(items, "ℹ️  Show Info")
+		items = append(items, "🔄 Reload Config")
+		items = append(items, "🚪 Exit")
+
+		prompt := promptui.Select{
+			Label: "Select a pipeline option",
+			Items: items,
+			Size:  10,
+		}
+
+		_, result, err := prompt.Run()
+		if err != nil {
+			fmt.Printf("❌ Menu cancelled: %v\n", err)
+			return
+		}
+
+		// Handle execution selection
+		for _, exec := range cfg.DirectAccess.Executions {
+			if fmt.Sprintf("▶️  %s (%s)", exec.Name, exec.Key) == result {
+				fmt.Printf("🚀 Executing pipeline: %s\n", exec.Name)
+
+				// Load pipeline
+				pipelinePath := filepath.Join(cfg.DirectAccess.PipelineDir, exec.Pipeline)
+				pipeline, err := parser.ParsePipeline(pipelinePath)
+				if err != nil {
+					fmt.Printf("❌ Failed to parse pipeline: %v\n", err)
+					continue
+				}
+
+				// Load vars (simplified version)
+				vars := make(types.Vars)
+				if exec.Variables != nil {
+					for k, v := range exec.Variables {
+						vars[k] = v
+					}
+				}
+
+				// Execute
+				executor := executor.NewExecutor()
+				if err := executor.Execute(pipeline, &exec, vars, exec.Hosts, cfg); err != nil {
+					fmt.Printf("❌ Execution failed: %v\n", err)
+				} else {
+					fmt.Println("✅ Pipeline executed successfully")
+				}
+
+				fmt.Println("\nPress Enter to continue...")
+				fmt.Scanln()
+				break
+			}
+		}
+
+		// Handle SSH command execution
+		for _, sshCmd := range cfg.DirectAccess.SSHCommands {
+			if fmt.Sprintf("🔗 %s", sshCmd.AccessName) == result {
+				fmt.Printf("🔗 Executing SSH command: %s\n", sshCmd.AccessName)
+				fmt.Printf("🔧 Command: %s\n", sshCmd.Command)
+
+				// Parse SSH command to get host name
+				hostName, err := parseSSHCommand(sshCmd.Command)
+				if err != nil {
+					fmt.Printf("❌ Error parsing SSH command: %v\n", err)
+					fmt.Println("\nPress Enter to continue...")
+					fmt.Scanln()
+					break
+				}
+
+				fmt.Printf("🔍 SSH Host: %s\n", hostName)
+
+				// Generate temporary SSH config
+				err = generateSSHTempConfig(cfg, hostName)
+				if err != nil {
+					fmt.Printf("❌ Error generating SSH temp config: %v\n", err)
+					fmt.Println("\nPress Enter to continue...")
+					fmt.Scanln()
+					break
+				}
+
+				// Execute the SSH command with custom config using -F option
+				modifiedCommand := strings.Replace(sshCmd.Command, "ssh ", "ssh -F .sync_temp/.ssh/config ", 1)
+				fmt.Printf("🔧 Modified command: %s\n", modifiedCommand)
+
+				cmd := exec.Command("bash", "-c", modifiedCommand)
+				cmd.Stdout = os.Stdout
+				cmd.Stderr = os.Stderr
+				cmd.Stdin = os.Stdin
+
+				err = cmd.Run()
+				if err != nil {
+					fmt.Printf("❌ Error executing SSH command: %v\n", err)
+				}
+
+				fmt.Println("\nPress Enter to continue...")
+				fmt.Scanln()
+				break
+			}
+		}
+
+		// Handle other options
+		switch result {
+		case "📝 Create Pipeline":
+			fmt.Print("Enter pipeline name: ")
+			var name string
+			fmt.Scanln(&name)
+			if name != "" {
+				// Simulate pipeline create command
+				fmt.Printf("Creating pipeline: %s\n", name)
+				// Note: This would need to be implemented properly
+				fmt.Printf("⚠️  Create functionality not implemented in menu yet\n")
+			}
+			fmt.Println("Press Enter to continue...")
+			fmt.Scanln()
+
+		case "📋 List Pipelines":
+			fmt.Println("Available Executions:")
+			for _, exec := range cfg.DirectAccess.Executions {
+				fmt.Printf("- %s (%s): %s\n", exec.Name, exec.Key, exec.Pipeline)
+			}
+			fmt.Println("\nPress Enter to continue...")
+			fmt.Scanln()
+
+		case "ℹ️  Show Info":
+			runPipelineInfo()
+			fmt.Println("\nPress Enter to continue...")
+			fmt.Scanln()
+
+		case "🔄 Reload Config":
+			fmt.Println("🔄 Reloading configuration...")
+			// Config will be reloaded on next menu iteration
+			fmt.Println("✅ Configuration reloaded")
+			fmt.Println("Press Enter to continue...")
+			fmt.Scanln()
+
+		case "🚪 Exit":
+			fmt.Println("👋 Goodbye!")
+			return
+		}
+	}
+}
+
 // newPipelineInfoCmd creates the pipeline info subcommand
 func newPipelineInfoCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -513,4 +684,135 @@ func getDockerPipelineTemplate(name string) string {
 	template = strings.ReplaceAll(template, "{{PIPELINE_NAME}}", name)
 
 	return template
+}
+
+// newPipelineMenuCmd creates the pipeline menu subcommand
+func newPipelineMenuCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "menu",
+		Short: "Interactive menu for pipeline operations",
+		Long:  `Launch an interactive menu to select and execute pipeline operations.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			showPipelineMenu()
+		},
+	}
+
+	return cmd
+}
+
+// parseSSHCommand parses SSH command to extract host name
+func parseSSHCommand(command string) (string, error) {
+	// Simple parsing for "ssh [options] host [command]"
+	parts := strings.Fields(command)
+	if len(parts) < 2 || parts[0] != "ssh" {
+		return "", fmt.Errorf("invalid SSH command format")
+	}
+
+	// Skip "ssh" and find the first non-option argument
+	for i := 1; i < len(parts); i++ {
+		part := parts[i]
+		// Skip options (starting with -)
+		if !strings.HasPrefix(part, "-") {
+			return part, nil
+		}
+	}
+
+	return "", fmt.Errorf("could not find host in SSH command")
+}
+
+// generateSSHTempConfig generates temporary SSH config folder (.sync_temp/.ssh/config)
+func generateSSHTempConfig(cfg *config.Config, hostName string) error {
+	syncTempDir := ".sync_temp"
+	sshDir := filepath.Join(syncTempDir, ".ssh")
+	configPath := filepath.Join(sshDir, "config")
+
+	// Clean up old .sync_temp file if it exists (from previous version)
+	if _, err := os.Stat(syncTempDir); err == nil {
+		// Check if it's a file, not a directory
+		if info, err := os.Stat(syncTempDir); err == nil && !info.IsDir() {
+			fmt.Printf("🔄 Removing old .sync_temp file...\n")
+			if err := os.Remove(syncTempDir); err != nil {
+				return fmt.Errorf("error removing old .sync_temp file: %v", err)
+			}
+		}
+	}
+
+	// Create .sync_temp directory if it doesn't exist
+	if err := os.MkdirAll(sshDir, 0755); err != nil {
+		return fmt.Errorf("error creating .sync_temp directory: %v", err)
+	}
+
+	// Render template variables first so =host, =remotePath, etc. are concrete
+	renderedCfg, rerr := config.RenderTemplateVariablesInMemory(cfg)
+	if rerr != nil {
+		return fmt.Errorf("error rendering template variables: %v", rerr)
+	}
+
+	// helper to quote values with spaces
+	quoteIfNeeded := func(s string) string {
+		if s == "" {
+			return s
+		}
+		if strings.ContainsAny(s, " \t\"'") {
+			// prefer double quotes; escape existing double quotes
+			s = strings.ReplaceAll(s, "\"", "\\\"")
+			return "\"" + s + "\""
+		}
+		return s
+	}
+
+	// Generate SSH config content for ALL entries (multi-host support)
+	var configLines []string
+	configLines = append(configLines, "# Temporary SSH config generated by pipeline")
+	configLines = append(configLines, "")
+
+	// Optionally: ensure the requested host exists, but still write all
+	hasRequested := false
+	for _, sc := range renderedCfg.DirectAccess.SSHConfigs {
+		if host, ok := sc["Host"].(string); ok && host == hostName {
+			hasRequested = true
+			break
+		}
+	}
+	if !hasRequested {
+		return fmt.Errorf("no SSH config found for host: %s", hostName)
+	}
+
+	for idx, sc := range renderedCfg.DirectAccess.SSHConfigs {
+		host, ok := sc["Host"].(string)
+		if !ok || host == "" {
+			continue
+		}
+		if idx > 0 {
+			configLines = append(configLines, "")
+		}
+		configLines = append(configLines, fmt.Sprintf("Host %s", host))
+
+		// Iterate over map and write non-empty values
+		for key, val := range sc {
+			// Skip Host field as it's already written above
+			if key == "Host" {
+				continue
+			}
+
+			if valStr := fmt.Sprintf("%v", val); valStr != "" {
+				// Khusus untuk RemoteCommand: jangan quote agar tidak ada petik ganda
+				if key == "RemoteCommand" {
+					configLines = append(configLines, fmt.Sprintf("    %s %s", key, valStr))
+				} else {
+					configLines = append(configLines, fmt.Sprintf("    %s %s", key, quoteIfNeeded(valStr)))
+				}
+			}
+		}
+	}
+
+	// Write to .sync_temp/.ssh/config file
+	content := strings.Join(configLines, "\n") + "\n"
+	err := os.WriteFile(configPath, []byte(content), 0644)
+	if err != nil {
+		return fmt.Errorf("error writing SSH temp config: %v", err)
+	}
+
+	fmt.Printf("✅ Generated SSH temp config with %d host entries: %s\n", len(renderedCfg.DirectAccess.SSHConfigs), configPath)
+	return nil
 }

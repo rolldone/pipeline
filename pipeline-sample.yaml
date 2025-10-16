@@ -1,26 +1,33 @@
 project_name: "my-pipeline-project"
-localPath: "."
 
-devsync:
-  os_target: "linux"
+var:
   auth:
-    username: "user"
-    host: "localhost"
-    port: 22
-    remotePath: "/tmp"
-    privateKey: ""  # Empty means no key validation
-  ignores: []
-  agent_watchs: []
-  manual_transfer: []
-  script: {}
-  trigger_permission: {}
+    username: root
+    privateKey: .ssh/openssh_nopassword
+    host: localhost
+    port: "221"
+    remotePath: /home/ubuntu/workspaces
 
 direct_access:
   pipeline_dir: "./pipelines"
+  ssh_configs:
+    - Host: ssh_connection_target
+      HostName: =var.auth.host
+      IdentityFile: =var.auth.privateKey
+      User: =var.auth.username
+      Port: =var.auth.port
+      RemoteCommand: mkdir -p =var.auth.remotePath && cd =var.auth.remotePath && bash -l
+      RequestTty: force
+      ServerAliveCountMax: "2"
+      ServerAliveInterval: "300"
+      StrictHostKeyChecking: "no"
+  ssh_commands:
+    - access_name: Enter Server
+      command: ssh -v ssh_connection_target
   executions:
     - name: "Example Pipeline"
       key: "example"
       pipeline: "example-pipeline.yaml"
       hosts: []
       variables: {}
-  ssh_configs: []
+  
