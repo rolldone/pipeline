@@ -22,11 +22,85 @@ A standalone CLI tool for executing automated pipeline workflows with interactiv
 
 ## Installation
 
+Recommended: download official release assets (binary + sample YAML files) from the project's GitHub Releases.
+
+If you need to build locally (portable binary) or create release artifacts, follow the options below.
+
+### Build portable from source (clone + build)
+
+Clone the repo and build a standalone binary. You can cross-compile for different OS/architectures using `GOOS`/`GOARCH`.
+
+Example (Linux x86_64):
+
 ```bash
-go install github.com/rolldone/pipeline@latest
+git clone https://github.com/rolldone/pipeline.git
+cd pipeline
+GOOS=linux GOARCH=amd64 go build -o pipeline ./
 ```
 
-Or download the binary from releases.
+Example (macOS arm64):
+
+```bash
+GOOS=darwin GOARCH=arm64 go build -o pipeline-macos ./
+```
+
+Example (Windows amd64):
+
+```bash
+GOOS=windows GOARCH=amd64 go build -o pipeline.exe ./
+```
+
+To make the binary callable globally on Unix-like systems, move it to a directory in PATH (may require sudo):
+
+```bash
+sudo mv pipeline /usr/local/bin/pipeline
+sudo chmod +x /usr/local/bin/pipeline
+```
+
+On Windows, place the `pipeline.exe` somewhere in your PATH or add its folder to the PATH environment variable.
+
+### Releases and distribution (recommended for users)
+
+- Publish release assets (per OS/arch) on GitHub Releases. Each release should include:
+  - Compiled binaries for supported platforms (linux, darwin, windows, with relevant architectures).
+  - `pipeline-sample.yaml` and `job-sample.yaml` so `pipeline init` works out-of-the-box.
+  - A small README or install notes in the release description.
+- Users download the correct asset for their OS, extract it, and move the binary to a directory in their PATH.
+
+### About sample/supporting YAML files
+
+This project expects certain sample files at runtime:
+
+- `pipeline-sample.yaml` is used by `pipeline init` (the binary looks for it next to the executable).
+- `job-sample.yaml` is used as the template for `pipeline create` when deriving job templates.
+
+If you install only the binary (for example via `go install` or by building and copying the binary) and do not include the sample files, `pipeline init` will report `pipeline-sample.yaml not found` and ask you to place the sample file next to the binary or run the binary from the repository tree. Packaging releases that include these sample files prevents that issue for end users.
+
+### Maintainer checklist before tagging a release
+
+- Ensure `go.mod` module path is `github.com/rolldone/pipeline` so `go install github.com/rolldone/pipeline@<tag>` works for users who choose that flow.
+- Confirm `main.go` exists at repository root and builds a single CLI binary.
+- Build artifacts for supported OS/architectures and attach them to the release.
+- Include `pipeline-sample.yaml` and `job-sample.yaml` in release assets (or embed them in the binary via `go:embed` if desired).
+- Create a semantic version tag (vMAJOR.MINOR.PATCH) for the release.
+
+### Quick installer examples
+
+Linux / macOS (one-liner to download and install from a release URL example):
+
+```bash
+# adjust URL to the actual release asset
+curl -L -o /tmp/pipeline.tar.gz https://github.com/rolldone/pipeline/releases/download/vX.Y.Z/pipeline-linux-amd64.tar.gz
+tar -xzf /tmp/pipeline.tar.gz -C /tmp
+sudo mv /tmp/pipeline /usr/local/bin/pipeline
+sudo chmod +x /usr/local/bin/pipeline
+```
+
+Windows (download release asset, extract and add to PATH):
+
+1. Download `pipeline-windows-amd64.zip` from the release page.
+2. Extract `pipeline.exe` and place it in a folder listed in your PATH, or add the folder to PATH.
+
 
 ## Quick Start
 
