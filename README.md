@@ -83,24 +83,13 @@ If you install only the binary (for example via `go install` or by building and 
 - Include `pipeline-sample.yaml` and `job-sample.yaml` in release assets (or embed them in the binary via `go:embed` if desired).
 - Create a semantic version tag (vMAJOR.MINOR.PATCH) for the release.
 
-### Quick installer examples
+### Releases and distribution (recommended for users)
 
-Linux / macOS (one-liner to download and install from a release URL example):
-
-```bash
-# adjust URL to the actual release asset
-curl -L -o /tmp/pipeline.tar.gz https://github.com/rolldone/pipeline/releases/download/vX.Y.Z/pipeline-linux-amd64.tar.gz
-tar -xzf /tmp/pipeline.tar.gz -C /tmp
-sudo cp /tmp/pipeline /usr/local/bin/pipeline
-sudo chmod +x /usr/local/bin/pipeline
-```
-
-Windows (download release asset, extract and add to PATH):
-
-1. Download `pipeline-windows-amd64.zip` from the release page.
-2. Extract `pipeline.exe` and place it in a folder listed in your PATH, or add the folder to PATH.
-
-
+- Publish release assets (per OS/arch) on GitHub Releases. Each release should include:
+  - Compiled binaries for supported platforms (linux, darwin, windows, with relevant architectures).
+  - `pipeline-sample.yaml` and `job-sample.yaml` so `pipeline init` works out-of-the-box.
+  - A small README or install notes in the release description.
+- Users download the correct asset for their OS, extract it, and move the binary to a directory in their PATH.
 ## Quick Start
 
 Initialize a new pipeline project:
