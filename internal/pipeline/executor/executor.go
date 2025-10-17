@@ -1119,26 +1119,7 @@ func (e *Executor) runFileTransferStep(step *types.Step, job *types.Job, config 
 		}
 
 		if fileTemplateEnabled {
-			// Render content with variables
-			content, err := os.ReadFile(src)
-			if err != nil {
-				return fmt.Errorf("failed to read source file %s: %v", src, err)
-			}
-			interpolatedContent := e.interpolateString(string(content), vars)
-
-			// Determine permission to send: prefer per-file perm from step.Files if present; else default 0755
-			permToUse := os.FileMode(0755)
-			if ps := e.getPermForEntry(step, src, dst); ps != "" {
-				if v, perr := strconv.ParseUint(ps, 8, 32); perr == nil {
-					permToUse = os.FileMode(v)
-				}
-			}
-
-			// Upload bytes directly (no temp file)
-			fmt.Printf("Uploading %s (rendered) to %s:%s\n", src, host, dst)
-			if err := client.UploadBytes([]byte(interpolatedContent), dst, permToUse); err != nil {
-				return fmt.Errorf("failed to upload file: %v", err)
-			}
+			return fmt.Errorf("file_transfer: content templating is removed; use write_file step to render and upload files")
 		} else {
 			// Upload file as-is without rendering
 			fmt.Printf("Uploading %s (as-is) to %s:%s\n", src, host, dst)
@@ -1977,9 +1958,11 @@ func (e *Executor) runLocalFileTransfer(step *types.Step, vars types.Vars) error
 
 	fmt.Printf("📁 Local file transfer: %s → %s\n", source, destination)
 
-	// Check if template rendering is enabled
+	// Deprecated: file content templating is no longer supported in `file_transfer`.
+	// Users should use the `write_file` step when they need content rendering
+	// (render -> upload/write). For now, treat template usage as an error.
 	if step.Template == "enabled" {
-		return e.runLocalFileTransferWithTemplate(source, destination, vars)
+		return fmt.Errorf("file_transfer: template rendering is deprecated; use write_file step instead")
 	}
 
 	// Regular file copy without template rendering
@@ -1987,30 +1970,7 @@ func (e *Executor) runLocalFileTransfer(step *types.Step, vars types.Vars) error
 }
 
 // runLocalFileTransferWithTemplate handles file transfer with template rendering
-func (e *Executor) runLocalFileTransferWithTemplate(source, destination string, vars types.Vars) error {
-	// Read source file
-	content, err := os.ReadFile(source)
-	if err != nil {
-		return fmt.Errorf("failed to read source file %s: %v", source, err)
-	}
-
-	// Render template with variables
-	renderedContent := e.interpolateString(string(content), vars)
-
-	// Ensure destination directory exists
-	destDir := filepath.Dir(destination)
-	if err := os.MkdirAll(destDir, 0755); err != nil {
-		return fmt.Errorf("failed to create destination directory %s: %v", destDir, err)
-	}
-
-	// Write rendered content to destination
-	if err := os.WriteFile(destination, []byte(renderedContent), 0644); err != nil {
-		return fmt.Errorf("failed to write rendered file %s: %v", destination, err)
-	}
-
-	fmt.Printf("✅ Template rendered and copied: %s → %s\n", source, destination)
-	return nil
-}
+// (template rendering removed; use write_file step)
 
 // copyLocalPath copies a file or directory from source to destination
 func (e *Executor) copyLocalPath(source, destination string) error {

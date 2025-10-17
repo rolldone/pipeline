@@ -409,19 +409,24 @@ steps:
     commands: ["docker build -t myapp:{{commit_sha}} ."]
 ```
 
-### File Template Rendering
+### File Template Rendering (changed)
 
-`file_transfer` steps with `template: "enabled"` render files with variable substitution before upload:
+Content templating is no longer supported in `file_transfer` or `rsync_file` steps.
+
+If you previously used `file_transfer` with `template: "enabled"` to render file contents, migrate to the `write_file` step which is designed to render content and then write or upload it. `write_file` renders using `{{var}}` interpolation and uploads rendered bytes from memory (default file mode 0755 when `perm` is omitted).
+
+Example `write_file` usage (render then upload):
 
 ```yaml
 jobs:
   - name: "deploy"
     steps:
       - name: "upload_config"
-        type: "file_transfer"
-        source: "config.php"
-        destination: "/var/www/config.php"
-        template: "enabled"
+        type: "write_file"
+        files:
+          - source: "config.php"
+            destination: "/var/www/config.php"
+            template: "enabled"
 ```
 
 ### Transfer per-file with `files` (recommended for many files)
@@ -485,6 +490,7 @@ This project supports an `rsync_file` step that wraps the system `rsync` binary.
 Important notes:
 - Requires `rsync` installed on the machine running the pipeline and on remote hosts when running in `remote` mode.
 - The step uses the existing SSH configuration created under `.sync_temp/.ssh/config` so rsync remote invocations use `-e "ssh -F .sync_temp/.ssh/config"`.
+- `rsync_file` does not render file contents. If you previously relied on templating before rsync, pre-render files using `write_file` into a temporary directory and rsync that directory.
 
 Example:
 
