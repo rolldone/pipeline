@@ -449,6 +449,99 @@ Behavior:
 - If multiple files are specified, `destination` must be a directory (ending with `/` or already a directory) — otherwise the step will error.
 - Backward compatibility: if `files` is not provided, `source` / `sources` will work as before.
 
+## Rsync-based file transfer step (`rsync_file`)
+
+This project supports an `rsync_file` step that wraps the system `rsync` binary. It provides more advanced include/exclude, delete, and performance options compared to the built-in `file_transfer` step.
+
+Important notes:
+- Requires `rsync` installed on the machine running the pipeline and on remote hosts when running in `remote` mode.
+- The step uses the existing SSH configuration created under `.sync_temp/.ssh/config` so rsync remote invocations use `-e "ssh -F .sync_temp/.ssh/config"`.
+
+Example:
+
+```yaml
+- name: "sync-assets"
+  type: "rsync_file"
+  includes: ["*/", "*.js", "*.css"]
+  excludes: ["*.map"]
+  options: ["--progress"]
+  delete_policy: "soft"       # soft (default) or force
+  confirm_force: false         # must be true when delete_policy: force
+  prune_empty_dirs: true
+  compress: true
+  dry_run: false
+  direction: "upload"
+  source: "dist/"
+  destination: "/var/www/assets/"
+  save_output: "rsync_summary"
+```
+
+Fields (rsync-specific):
+
+| Field | Type | Default | Description |
+|---|---:|---:|---|
+| `includes` | []string | - | Maps to `--include=` patterns (order preserved)
+| `excludes` | []string | - | Maps to `--exclude=` patterns
+| `options` | []string | - | Additional rsync flags (e.g. `--progress`, `--chmod`)
+| `delete_policy` | string | `soft` | `soft` disallows destructive `--delete` options; `force` enables `--delete` but requires `confirm_force: true`
+| `delete_excluded` | bool | false | Maps to `--delete-excluded` (only when `delete_policy: force`)
+| `compress` | bool | true | Use `-z` when running remote
+| `prune_empty_dirs` | bool | false | Maps to `--prune-empty-dirs`
+| `dry_run` | bool | false | Maps to `--dry-run` for preview
+
+SaveOutput (structured JSON)
+When `save_output` is set on an `rsync_file` step, the executor will add `--stats` to the rsync invocation and parse the textual stats. A JSON summary is saved into the pipeline's context variables under the given key. Example saved JSON:
+
+```json
+{
+  "exit_code": 0,
+  "reason": "success",        // success | idle_timeout | total_timeout | error
+  "duration_seconds": 2,
+  "files_transferred": 12,
+  "bytes_transferred": 1234567,
+  "stdout_tail": "...last lines...",
+  "stderr_tail": "...last lines..."
+}
+```
+
+The `reason` field helps callers distinguish between normal success and various termination reasons (idle timeout, total timeout, or other errors).
+
+Safety
+- `delete_policy: force` requires `confirm_force: true` to avoid accidental destructive syncs.
+- When `delete_policy: soft`, specifying `--delete` or `--delete-excluded` through `options` will be rejected by the arg-builder.
+
+Integration testing
+- See `docs/INTEGRATION_TESTING.md` for instructions to run a Docker-based SSH server with `rsync` installed for integration tests.
+
+### Example: per-file entries (`files: []`) with `rsync_file`
+
+Use the `files` array when you need to transfer individual files with different destinations or templates. `rsync_file` accepts the same `files` entries as `file_transfer` — the executor expands globs, preserves relative paths when destination is a directory, and runs rsync per resolved entry.
+
+```yaml
+- name: "sync-configs-and-assets"
+  type: "rsync_file"
+  includes: ["*/", "*.conf"]
+  excludes: ["*.tmp"]
+  options: ["--progress"]
+  delete_policy: "force"
+  confirm_force: true
+  compress: true
+  direction: "upload"
+  files:
+    - source: "nginx/nginx.conf"
+      destination: "/etc/nginx/nginx.conf"
+    - source: "site/assets/"
+      destination: "/var/www/site/assets/"
+    - source: "site/robots.txt"
+      destination: "/var/www/site/robots.txt"
+  save_output: "rsync_summary"
+```
+
+Notes:
+- `files` entries may include glob patterns (e.g. `site/**/*.js`) — the executor expands them locally before invoking rsync.
+- If you require per-file templating (variable interpolation inside file contents), either use `file_transfer` (which renders per-file) or pre-render files to a temporary directory and rsync that directory.
+- `rsync_file` executes rsync per resolved entry; for many small files it's usually more efficient to sync a directory instead of many individual entries.
+
 ## Running Pipelines
 
 ```bash

@@ -1,0 +1,48 @@
+# Sample pipeline demonstrating rsync_file step
+# - includes/excludes
+# - delete_policy: force (requires confirm_force: true)
+# - save_output to capture rsync --stats and render warnings
+# - templating example via variables
+
+variables:
+  deploy_target: "webserver-01"
+  site_name: "example-site"
+
+jobs:
+  - name: sync-site
+    hosts:
+      - "{{deploy_target}}"
+    steps:
+      - name: prepare-local-files
+        type: command
+        mode: local
+        file: |
+          mkdir -p build/
+          echo "<!doctype html><html><body>Hello from {{site_name}}</body></html>" > build/index.html
+
+      - name: rsync-website
+        type: rsync_file
+        mode: remote
+        # sources can be a single path, or use files: [] to specify multiple entries
+        source: build/
+        destination: /var/www/{{site_name}}/
+        includes:
+          - "*.html"
+          - "assets/**"
+        excludes:
+          - "*.tmp"
+        # delete_policy soft|force. force requires confirm_force:true to avoid accidental deletes
+        delete_policy: force
+        confirm_force: true
+        compress: true
+        prune_empty_dirs: true
+        # If set, executor will add --stats and save structured JSON under this context variable
+        save_output: rsync.sync.result
+        # enable templating of files before rsync (render into a temp dir)
+        template: enabled
+
+      - name: show-sync-result
+        type: command
+        mode: local
+        file: |
+          echo "Rsync summary: {{rsync.sync.result}}"

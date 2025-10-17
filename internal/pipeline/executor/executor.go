@@ -3,6 +3,7 @@ package executor
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"pipeline/internal/config"
 	"pipeline/internal/pipeline/types"
@@ -27,6 +29,10 @@ type Executor struct {
 	// output history per execution (in-memory ring buffer, byte-capped)
 	outputHistory *RingBuffer
 	historyMu     sync.Mutex
+	// WriteFileFunc allows tests to inject write failures; defaults to os.WriteFile
+	WriteFileFunc func(filename string, data []byte, perm os.FileMode) error
+	// ExecCommand allows tests to inject a fake command runner; defaults to exec.Command
+	ExecCommand func(name string, arg ...string) *exec.Cmd
 }
 
 // NewExecutor creates a new executor
@@ -34,6 +40,8 @@ func NewExecutor() *Executor {
 	return &Executor{
 		tempDir:              ".sync_temp",
 		executedAsSubroutine: make(map[string]bool),
+		WriteFileFunc:        os.WriteFile,
+		ExecCommand:          exec.Command,
 	}
 }
 
@@ -111,6 +119,47 @@ func stripAnsiCodes(str string) string {
 	// Regex pattern to match ANSI escape codes
 	ansiRegex := regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 	return ansiRegex.ReplaceAllString(str, "")
+}
+
+// isTextBytes performs a heuristic check whether data bytes represent text.
+// It returns true if data likely contains UTF-8 text and no NUL bytes.
+func isTextBytes(data []byte) bool {
+	if len(data) == 0 {
+		return true
+	}
+	// quick NUL check
+	for _, b := range data {
+		if b == 0 {
+			return false
+		}
+	}
+	// check UTF-8 validity on sample (whole data or prefix)
+	sample := data
+	if len(sample) > 8192 {
+		sample = sample[:8192]
+	}
+	if !utf8.Valid(sample) {
+		// If not valid UTF-8, treat as binary by default
+		return false
+	}
+	// compute proportion of non-printable runes; allow a small fraction (e.g., < 10%)
+	printable := 0
+	total := 0
+	for len(sample) > 0 {
+		r, size := utf8.DecodeRune(sample)
+		sample = sample[size:]
+		total++
+		if r == utf8.RuneError {
+			continue
+		}
+		if r >= 32 || r == '\n' || r == '\r' || r == '\t' {
+			printable++
+		}
+	}
+	if total == 0 {
+		return true
+	}
+	return float64(printable)/float64(total) >= 0.9
 }
 
 // RingBuffer stores lines with a total byte cap. FIFO when cap exceeded.
@@ -418,12 +467,279 @@ func (e *Executor) runStep(step *types.Step, job *types.Job, config map[string]i
 	case "file_transfer":
 		err := e.runFileTransferStep(step, job, config, vars)
 		return "", "", err
+	case "rsync_file":
+		err := e.runRsyncStep(step, job, config, vars)
+		return "", "", err
 	case "script":
 		err := e.runScriptStep(step, job, config, vars)
 		return "", "", err
 	default: // "command" or empty
 		return e.runCommandStep(step, job, config, vars)
 	}
+}
+
+// runRsyncStep executes an rsync_file step. It builds per-entry rsync args using the
+// pure helper, runs rsync (local or remote via -e ssh -F .sync_temp/.ssh/config),
+// captures stdout/stderr, enforces optional timeouts, and when step.SaveOutput is
+// set it appends --stats, parses the output and saves structured JSON into
+// e.pipeline.ContextVariables[step.SaveOutput].
+func (e *Executor) runRsyncStep(step *types.Step, job *types.Job, config map[string]interface{}, vars types.Vars) error {
+	jobMode := job.Mode
+	if jobMode == "" {
+		jobMode = "remote"
+	}
+
+	// Build entries using existing helper for file_transfer-style sources
+	rawEntries, err := e.buildFileTransferEntries(step, vars)
+	if err != nil {
+		return err
+	}
+
+	// Pre-render templated files (if any) into a temp directory so rsync can sync rendered content.
+	// This preserves the original destination mapping but uses temp sources for rsync.
+	preparedEntries, cleanup, renderWarnings, err := e.prepareRsyncEntriesWithTemplates(step, rawEntries, vars)
+	if err != nil {
+		return err
+	}
+	// ensure temp files/directories are removed after rsync operations
+	defer func() {
+		if cleanup != nil {
+			cleanup()
+		}
+	}()
+
+	// Convert prepared entries to simple source/destination pairs for rsync helper
+	entries := make([]struct{ Source, Destination string }, 0, len(preparedEntries))
+	for _, r := range preparedEntries {
+		entries = append(entries, struct{ Source, Destination string }{Source: r.Source, Destination: r.Destination})
+	}
+
+	// Determine host for remote operations
+	host, _ := config["HostName"].(string)
+	if host == "" {
+		host, _ = config["Host"].(string)
+	}
+
+	argSlices, err := e.buildRsyncArgSlices(step, jobMode, host, entries)
+	if err != nil {
+		return err
+	}
+
+	// Prepare storage for aggregated stdout/stderr (per-step)
+	var stdoutBuf bytes.Buffer
+	var stderrBuf bytes.Buffer
+
+	// Ensure context variables map exists
+	if e.pipeline != nil && e.pipeline.ContextVariables == nil {
+		e.pipeline.ContextVariables = make(map[string]string)
+	}
+
+	// Run each rsync invocation sequentially
+	for _, args := range argSlices {
+		// If SaveOutput requested, ensure --stats is present
+		if step.SaveOutput != "" {
+			hasStats := false
+			for _, a := range args {
+				if a == "--stats" {
+					hasStats = true
+					break
+				}
+			}
+			if !hasStats {
+				args = append(args[:len(args):len(args)], "--stats")
+			}
+		}
+
+		cmd := e.ExecCommand("rsync", args...)
+
+		stdoutPipe, err := cmd.StdoutPipe()
+		if err != nil {
+			e.flushErrorEvidenceAll()
+			return fmt.Errorf("failed to get stdout pipe for rsync: %v", err)
+		}
+		stderrPipe, err := cmd.StderrPipe()
+		if err != nil {
+			e.flushErrorEvidenceAll()
+			return fmt.Errorf("failed to get stderr pipe for rsync: %v", err)
+		}
+
+		if err := cmd.Start(); err != nil {
+			e.flushErrorEvidenceAll()
+			return fmt.Errorf("failed to start rsync: %v", err)
+		}
+
+		start := time.Now()
+
+		// track last activity time for idle detection (updated by scanners)
+		var lastActivity time.Time = time.Now()
+
+		// Stream stdout/stderr
+		outScanner := bufio.NewScanner(stdoutPipe)
+		errScanner := bufio.NewScanner(stderrPipe)
+
+		done := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		go func() {
+			defer wg.Done()
+			for outScanner.Scan() {
+				line := outScanner.Text()
+				stdoutBuf.WriteString(line + "\n")
+				e.historyMu.Lock()
+				if e.outputHistory != nil {
+					e.outputHistory.Add(line)
+				}
+				e.historyMu.Unlock()
+				// update last activity timestamp for idle detection
+				lastActivity = time.Now()
+				if !step.Silent {
+					fmt.Println(line)
+				}
+			}
+		}()
+
+		go func() {
+			defer wg.Done()
+			for errScanner.Scan() {
+				line := errScanner.Text()
+				stderrBuf.WriteString(line + "\n")
+				e.historyMu.Lock()
+				if e.outputHistory != nil {
+					e.outputHistory.Add(line)
+				}
+				e.historyMu.Unlock()
+				// update last activity timestamp for idle detection
+				lastActivity = time.Now()
+				if !step.Silent {
+					fmt.Fprintln(os.Stderr, line)
+				}
+			}
+		}()
+
+		// Total timeout watcher: handled in a separate goroutine below when step.Timeout > 0
+
+		// Idle timeout watcher: check periodically
+		var idleTicker *time.Ticker
+		if step.IdleTimeout > 0 {
+			idleTicker = time.NewTicker(1 * time.Second)
+		} else {
+			// default 600s if not set
+			idleTicker = time.NewTicker(1 * time.Second)
+			if step.IdleTimeout == 0 {
+				// set a sentinel value in variable but keep ticker active
+				step.IdleTimeout = 600
+			}
+		}
+
+		// Monitor goroutine to detect idle and total timeout
+		monitorDone := make(chan struct{})
+		killReason := make(chan string, 1)
+		go func() {
+			defer close(monitorDone)
+			for {
+				select {
+				case <-idleTicker.C:
+					if time.Since(lastActivity) > time.Duration(step.IdleTimeout)*time.Second {
+						_ = cmd.Process.Kill()
+						select {
+						case killReason <- "idle_timeout":
+						default:
+						}
+						return
+					}
+				case <-done:
+					return
+				}
+			}
+		}()
+
+		// Total timeout watcher
+		if step.Timeout > 0 {
+			go func() {
+				t := time.NewTimer(time.Duration(step.Timeout) * time.Second)
+				defer t.Stop()
+				select {
+				case <-t.C:
+					_ = cmd.Process.Kill()
+					select {
+					case killReason <- "total_timeout":
+					default:
+					}
+				case <-done:
+					return
+				}
+			}()
+		}
+
+		// Wait for command completion
+		wg.Wait()
+		close(done)
+		// stop idle ticker and wait for monitor to finish
+		if idleTicker != nil {
+			idleTicker.Stop()
+		}
+		<-monitorDone
+		if err := cmd.Wait(); err != nil {
+			// determine reason
+			reason := "error"
+			select {
+			case r := <-killReason:
+				reason = r
+			default:
+			}
+			duration := int(time.Since(start).Seconds())
+			if step.SaveOutput != "" && e.pipeline != nil {
+				stats := parseRsyncStats(stdoutBuf.String(), stderrBuf.String(), 200)
+				if stats.DurationSeconds == 0 {
+					stats.DurationSeconds = duration
+				}
+				outMap := map[string]interface{}{
+					"exit_code":         1,
+					"reason":            reason,
+					"duration_seconds":  stats.DurationSeconds,
+					"files_transferred": stats.FilesTransferred,
+					"bytes_transferred": stats.BytesTransferred,
+					"stdout_tail":       stats.StdoutTail,
+					"stderr_tail":       stats.StderrTail,
+				}
+				if len(renderWarnings) > 0 {
+					outMap["render_warnings"] = renderWarnings
+				}
+				if b, jerr := json.Marshal(outMap); jerr == nil {
+					e.pipeline.ContextVariables[step.SaveOutput] = string(b)
+				}
+			}
+			e.flushErrorEvidenceAll()
+			return fmt.Errorf("rsync failed: %v", err)
+		}
+
+		// Successful run: record duration and optionally save parsed stats
+		duration := int(time.Since(start).Seconds())
+		if step.SaveOutput != "" && e.pipeline != nil {
+			stats := parseRsyncStats(stdoutBuf.String(), stderrBuf.String(), 200)
+			if stats.DurationSeconds == 0 {
+				stats.DurationSeconds = duration
+			}
+			outMap := map[string]interface{}{
+				"exit_code":         0,
+				"reason":            "success",
+				"duration_seconds":  stats.DurationSeconds,
+				"files_transferred": stats.FilesTransferred,
+				"bytes_transferred": stats.BytesTransferred,
+				"stdout_tail":       stats.StdoutTail,
+				"stderr_tail":       stats.StderrTail,
+			}
+			if len(renderWarnings) > 0 {
+				outMap["render_warnings"] = renderWarnings
+			}
+			if b, jerr := json.Marshal(outMap); jerr == nil {
+				e.pipeline.ContextVariables[step.SaveOutput] = string(b)
+			}
+		}
+	}
+
+	return nil
 }
 
 // runCommandStep runs a command step on a host with conditional and interactive support
@@ -1583,24 +1899,176 @@ func (e *Executor) copyGlobPattern(pattern, destination string) error {
 	if err != nil {
 		return fmt.Errorf("invalid glob pattern %s: %v", pattern, err)
 	}
-
 	if len(matches) == 0 {
-		return fmt.Errorf("no files match pattern %s", pattern)
+		return fmt.Errorf("no files match glob pattern %s", pattern)
 	}
-
-	for _, match := range matches {
-		// Calculate relative path for destination
-		relPath, err := filepath.Rel(filepath.Dir(pattern), match)
+	// Ensure destination exists as a directory
+	if err := os.MkdirAll(destination, 0755); err != nil {
+		return fmt.Errorf("failed to create destination directory %s: %v", destination, err)
+	}
+	for _, m := range matches {
+		info, err := os.Stat(m)
 		if err != nil {
-			relPath = filepath.Base(match)
+			return fmt.Errorf("failed to stat matched file %s: %v", m, err)
 		}
+		base := filepath.Base(m)
+		destPath := filepath.Join(destination, base)
+		if info.IsDir() {
+			if err := e.copyDirectory(m, destPath); err != nil {
+				return err
+			}
+		} else {
+			if err := e.copyFile(m, destPath); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
 
-		destPath := filepath.Join(destination, relPath)
-		if err := e.copyFile(match, destPath); err != nil {
-			return err
+// copyGlobPattern handles glob patterns like src/**/*.js
+func (e *Executor) prepareRsyncEntriesWithTemplates(step *types.Step, rawEntries []struct {
+	Source      string
+	Destination string
+	Template    string
+}, vars types.Vars) ([]struct{ Source, Destination string }, func(), []map[string]string, error) {
+	type entry struct{ Source, Destination string }
+	var out []entry
+
+	// Decide whether step-level templating is enabled
+	stepTemplateEnabled := (step.Template == "enabled")
+
+	// Determine if any per-file templating requested
+	anyTemplate := stepTemplateEnabled
+	for _, f := range rawEntries {
+		if f.Template == "enabled" {
+			anyTemplate = true
+			break
 		}
 	}
 
-	fmt.Printf("✅ Glob pattern copied: %s → %s (%d files)\n", pattern, destination, len(matches))
-	return nil
+	// If no templating requested at all, just return original entries and nil cleanup
+	if !anyTemplate {
+		passthrough := make([]struct{ Source, Destination string }, 0, len(rawEntries))
+		for _, r := range rawEntries {
+			passthrough = append(passthrough, struct{ Source, Destination string }{Source: r.Source, Destination: r.Destination})
+		}
+		return passthrough, func() {}, nil, nil
+	}
+
+	// Ensure base temp dir exists
+	os.MkdirAll(e.tempDir, 0755)
+
+	tmpBase, err := os.MkdirTemp(e.tempDir, "rsync_render_")
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to create temp dir for rsync rendering: %v", err)
+	}
+
+	cleanup := func() {
+		os.RemoveAll(tmpBase)
+	}
+
+	// collect warnings for any render-related issues
+	var renderWarnings []map[string]string
+
+	for _, r := range rawEntries {
+		srcPath := r.Source
+
+		info, serr := os.Stat(srcPath)
+		if serr != nil {
+			// If source doesn't exist locally (edge case), just copy through the path as-is
+			out = append(out, entry{Source: srcPath, Destination: r.Destination})
+			continue
+		}
+
+		if info.IsDir() {
+			rel := filepath.Base(srcPath)
+			destDir := filepath.Join(tmpBase, rel)
+			if err := os.MkdirAll(destDir, 0755); err != nil {
+				cleanup()
+				return nil, nil, renderWarnings, fmt.Errorf("failed to create temp dir %s: %v", destDir, err)
+			}
+			err := filepath.Walk(srcPath, func(path string, info os.FileInfo, err error) error {
+				if err != nil {
+					return err
+				}
+				relPath, _ := filepath.Rel(srcPath, path)
+				target := filepath.Join(destDir, relPath)
+				if info.IsDir() {
+					return os.MkdirAll(target, 0755)
+				}
+				data, rerr := os.ReadFile(path)
+				if rerr != nil {
+					return rerr
+				}
+				// Default behavior: copy. If templating enabled and file looks like text, attempt render.
+				if stepTemplateEnabled {
+					if isTextBytes(data) {
+						content := string(data)
+						rendered := e.interpolateString(content, vars)
+						if werr := e.WriteFileFunc(target, []byte(rendered), info.Mode()); werr != nil {
+							// tolerate write error: fallback to original bytes and record a warning
+							_ = e.WriteFileFunc(target, data, info.Mode())
+							renderWarnings = append(renderWarnings, map[string]string{"file": path, "error": werr.Error()})
+						}
+					} else {
+						// binary file - copy as-is
+						if werr := e.WriteFileFunc(target, data, info.Mode()); werr != nil {
+							return werr
+						}
+					}
+				} else {
+					if werr := e.WriteFileFunc(target, data, info.Mode()); werr != nil {
+						return werr
+					}
+				}
+				return nil
+			})
+			if err != nil {
+				cleanup()
+				return nil, nil, renderWarnings, fmt.Errorf("failed to copy/render directory %s: %v", srcPath, err)
+			}
+			out = append(out, entry{Source: destDir, Destination: r.Destination})
+		} else {
+			base := filepath.Base(srcPath)
+			target := filepath.Join(tmpBase, base)
+			data, rerr := os.ReadFile(srcPath)
+			if rerr != nil {
+				cleanup()
+				return nil, nil, renderWarnings, fmt.Errorf("failed to read source file %s: %v", srcPath, rerr)
+			}
+			if stepTemplateEnabled && isTextBytes(data) {
+				content := string(data)
+				rendered := e.interpolateString(content, vars)
+				if werr := e.WriteFileFunc(target, []byte(rendered), info.Mode()); werr != nil {
+					// tolerate write error: fallback to original bytes and record a warning
+					_ = e.WriteFileFunc(target, data, info.Mode())
+					renderWarnings = append(renderWarnings, map[string]string{"file": srcPath, "error": werr.Error()})
+				}
+			} else {
+				if werr := e.WriteFileFunc(target, data, info.Mode()); werr != nil {
+					cleanup()
+					return nil, nil, renderWarnings, fmt.Errorf("failed to write temp file %s: %v", target, werr)
+				}
+			}
+			out = append(out, entry{Source: target, Destination: r.Destination})
+		}
+	}
+
+	// Convert to expected return type
+	ret := make([]struct{ Source, Destination string }, 0, len(out))
+	for _, o := range out {
+		ret = append(ret, struct{ Source, Destination string }{Source: o.Source, Destination: o.Destination})
+	}
+	// attach warnings to a temporary location by writing a small JSON file in tmpBase
+	if len(renderWarnings) > 0 {
+		warnPath := filepath.Join(tmpBase, "__render_warnings.json")
+		if b, jerr := json.Marshal(renderWarnings); jerr == nil {
+			_ = e.WriteFileFunc(warnPath, b, 0644)
+			for _, w := range renderWarnings {
+				e.writeLog(fmt.Sprintf("WARN: render warning for %s: %s", w["file"], w["error"]))
+			}
+		}
+	}
+	return ret, cleanup, renderWarnings, nil
 }

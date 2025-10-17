@@ -32,15 +32,28 @@ type Job struct {
 // Step represents a step within a job
 type Step struct {
 	Name        string      `yaml:"name"`
-	Type        string      `yaml:"type,omitempty"`         // "command" (default), "file_transfer", "script"
-	Commands    []string    `yaml:"commands,omitempty"`     // for command type
-	File        string      `yaml:"file,omitempty"`         // for script/file_transfer
-	Source      string      `yaml:"source,omitempty"`       // for file_transfer (deprecated when using `files`)
-	Sources     []string    `yaml:"sources,omitempty"`      // optional: multiple sources for file_transfer
-	Destination string      `yaml:"destination,omitempty"`  // for file_transfer
-	Files       []FileEntry `yaml:"files,omitempty"`        // per-file entries: {source,destination,template}
-	Direction   string      `yaml:"direction,omitempty"`    // "upload" (default) or "download" for file_transfer
-	Template    string      `yaml:"template,omitempty"`     // "enabled" to render {{variables}} in file content
+	Type        string      `yaml:"type,omitempty"`        // "command" (default), "file_transfer", "script"
+	Commands    []string    `yaml:"commands,omitempty"`    // for command type
+	File        string      `yaml:"file,omitempty"`        // for script/file_transfer
+	Source      string      `yaml:"source,omitempty"`      // for file_transfer (deprecated when using `files`)
+	Sources     []string    `yaml:"sources,omitempty"`     // optional: multiple sources for file_transfer
+	Destination string      `yaml:"destination,omitempty"` // for file_transfer
+	Files       []FileEntry `yaml:"files,omitempty"`       // per-file entries: {source,destination,template}
+	Direction   string      `yaml:"direction,omitempty"`   // "upload" (default) or "download" for file_transfer
+	Template    string      `yaml:"template,omitempty"`    // "enabled" to render {{variables}} in file content
+
+	// rsync-specific fields
+	Includes       []string `yaml:"includes,omitempty"`         // patterns to include (mapped to --include)
+	Excludes       []string `yaml:"excludes,omitempty"`         // patterns to exclude (mapped to --exclude)
+	Options        []string `yaml:"options,omitempty"`          // additional rsync flags
+	DeletePolicy   string   `yaml:"delete_policy,omitempty"`    // "soft" (default) or "force"
+	DeleteExcluded bool     `yaml:"delete_excluded,omitempty"`  // maps to --delete-excluded when force
+	Compress       *bool    `yaml:"compress,omitempty"`         // whether to use compression (-z)
+	ConfirmForce   bool     `yaml:"confirm_force,omitempty"`    // guard for destructive delete_policy=force
+	PruneEmptyDirs bool     `yaml:"prune_empty_dirs,omitempty"` // map to --prune-empty-dirs
+	Parallel       bool     `yaml:"parallel,omitempty"`         // run per-host in parallel (executor may ignore)
+	DryRun         bool     `yaml:"dry_run,omitempty"`          // map to --dry-run for preview
+
 	Conditions  []Condition `yaml:"conditions,omitempty"`   // conditional execution based on output
 	Expect      []Expect    `yaml:"expect,omitempty"`       // interactive prompt responses
 	WorkingDir  string      `yaml:"working_dir,omitempty"`  // override working directory for this step
