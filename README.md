@@ -50,14 +50,13 @@ Example (Windows amd64):
 GOOS=windows GOARCH=amd64 go build -o pipeline.exe ./
 ```
 
-To make the binary callable globally on Unix-like systems, move it to a directory in PATH (may require sudo):
+To make the binary callable globally on Unix-like systems, create a symbolic link to a directory in PATH (may require sudo):
 
 ```bash
-sudo mv pipeline /usr/local/bin/pipeline
-sudo chmod +x /usr/local/bin/pipeline
+sudo ln -s $(pwd)/pipeline /usr/local/bin/pipeline
 ```
 
-On Windows, place the `pipeline.exe` somewhere in your PATH or add its folder to the PATH environment variable.
+This preserves the original binary in your build directory while making it globally accessible. On Windows, place the `pipeline.exe` somewhere in your PATH or add its folder to the PATH environment variable.
 
 ### Releases and distribution (recommended for users)
 
