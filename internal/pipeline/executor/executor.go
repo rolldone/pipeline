@@ -27,6 +27,8 @@ type Executor struct {
 	pipeline             *types.Pipeline
 	executedAsSubroutine map[string]bool
 	logFile              *os.File
+	hasError             bool // tracks if any error occurred during execution
+	forceLogging         bool // forces all logging when error occurs
 	// output history per execution (in-memory ring buffer, byte-capped)
 	outputHistory *RingBuffer
 	historyMu     sync.Mutex
@@ -73,6 +75,11 @@ type SSHClient interface {
 
 // writeLog writes a message to the log file (lazy initialization)
 func (e *Executor) writeLog(message string) {
+	// If log file hasn't been created yet but logging is needed, create it
+	if e.logFile == nil && (e.hasError || e.shouldCreateLogFile()) {
+		e.createLogFile()
+	}
+	
 	if e.logFile != nil {
 		// Strip ANSI escape codes for clean log file
 		cleanMessage := stripAnsiCodes(message)
@@ -112,6 +119,14 @@ func (e *Executor) flushErrorEvidenceAll() {
 	if len(lines) == 0 {
 		return
 	}
+	
+	// Ensure log file exists when flushing error evidence (force create on error)
+	if e.logFile == nil {
+		e.hasError = true // Mark as error occurred
+		e.forceLogging = true // Force logging
+		e.createLogFile()
+	}
+	
 	header := "=== ERROR EVIDENCE (buffer up to 300KB) ==="
 	e.writeLog(header)
 	for _, l := range lines {
@@ -120,7 +135,7 @@ func (e *Executor) flushErrorEvidenceAll() {
 }
 
 // shouldLogOutput decides whether to log command output based on priority:
-// Step.LogOutput > Job.LogOutput > Pipeline.LogOutput > default(false)
+// Step.LogOutput > Job.LogOutput > Pipeline.LogOutput > forceLogging > default(false)
 func (e *Executor) shouldLogOutput(step *types.Step, job *types.Job) bool {
 	// Step-level
 	if step != nil && step.LogOutput != nil {
@@ -136,8 +151,70 @@ func (e *Executor) shouldLogOutput(step *types.Step, job *types.Job) bool {
 			return *e.pipeline.LogOutput
 		}
 	}
+	// If forced logging (due to error), always log
+	if e.forceLogging {
+		return true
+	}
 	// default false
 	return false
+}
+
+// shouldCreateLogFile determines if a log file should be created based on explicit log_output settings
+func (e *Executor) shouldCreateLogFile() bool {
+	// Check pipeline level
+	if e.pipeline != nil && e.pipeline.LogOutput != nil && *e.pipeline.LogOutput {
+		return true
+	}
+	// Check all jobs
+	for _, job := range e.pipeline.Jobs {
+		if job.LogOutput != nil && *job.LogOutput {
+			return true
+		}
+		// Check all steps in job
+		for _, step := range job.Steps {
+			if step.LogOutput != nil && *step.LogOutput {
+				return true
+			}
+		}
+	}
+	return false // Default: no log file unless error occurs
+}
+
+// ensureConditionalLogging creates log file if needed before function exit
+func (e *Executor) ensureConditionalLogging() {
+	// Create log file if not already created and needed (for explicit logging without errors)
+	if e.logFile == nil && e.shouldCreateLogFile() {
+		e.createLogFile()
+	}
+
+	// Ensure log file is closed when function exits (if it was created)
+	if e.logFile != nil {
+		e.logFile.Close()
+	}
+}
+
+// createLogFile creates the log file and writes initial header
+func (e *Executor) createLogFile() {
+	logsDir := ".sync_temp/logs"
+	os.MkdirAll(logsDir, 0755)
+
+	pipelineName := "unknown"
+	if e.pipeline != nil && e.pipeline.Name != "" {
+		pipelineName = e.pipeline.Name
+	}
+
+	timestamp := time.Now().Format("2006-01-02-15-04-05")
+	logPath := filepath.Join(logsDir, fmt.Sprintf("%s-%s.log", pipelineName, timestamp))
+
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err == nil {
+		e.logFile = logFile
+		// Write header
+		e.logFile.WriteString(fmt.Sprintf("=== Pipeline: %s ===\n", pipelineName))
+		e.logFile.WriteString(fmt.Sprintf("Started: %s\n\n", timestamp))
+		e.logFile.Sync()
+		// Note: defer close is handled by caller
+	}
 }
 
 // stripAnsiCodes removes ANSI escape sequences from string
@@ -256,6 +333,9 @@ func (e *Executor) Execute(pipeline *types.Pipeline, execution *types.Execution,
 		execution.Jobs = []string{} // Initialize if nil
 	}
 
+	// Ensure conditional log creation happens before function exit
+	defer e.ensureConditionalLogging()
+
 	// Initialize subroutine tracking
 	e.executedAsSubroutine = make(map[string]bool)
 
@@ -263,28 +343,6 @@ func (e *Executor) Execute(pipeline *types.Pipeline, execution *types.Execution,
 	sshConfigs, err := e.resolveSSHConfigs(hosts, cfg)
 	if err != nil {
 		return fmt.Errorf("failed to resolve SSH configs: %v", err)
-	}
-
-	// Create log file immediately after SSH configs resolved
-	logsDir := ".sync_temp/logs"
-	os.MkdirAll(logsDir, 0755)
-
-	pipelineName := "unknown"
-	if pipeline != nil && pipeline.Name != "" {
-		pipelineName = pipeline.Name
-	}
-
-	timestamp := time.Now().Format("2006-01-02-15-04-05")
-	logPath := filepath.Join(logsDir, fmt.Sprintf("%s-%s.log", pipelineName, timestamp))
-
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err == nil {
-		e.logFile = logFile
-		defer e.logFile.Close()
-		// Write header
-		e.logFile.WriteString(fmt.Sprintf("=== Pipeline: %s ===\n", pipelineName))
-		e.logFile.WriteString(fmt.Sprintf("Started: %s\n\n", timestamp))
-		e.logFile.Sync()
 	}
 
 	// initialize output history buffer (300 KB cap)
@@ -317,6 +375,12 @@ func (e *Executor) Execute(pipeline *types.Pipeline, execution *types.Execution,
 
 		err = e.runJobFromStep(job, jobName, 0, sshConfigs, vars, pipeline, currentJobIndex == 0)
 		if err != nil {
+			e.hasError = true
+			e.forceLogging = true // Force all logging when error occurs
+			// Create log file immediately when error occurs
+			if e.logFile == nil && (e.hasError || e.shouldCreateLogFile()) {
+				e.createLogFile()
+			}
 			return err
 		}
 
@@ -505,6 +569,12 @@ func (e *Executor) runJobFromStep(job *types.Job, jobName string, startStepIdx i
 			}
 			err = e.runJobFromStep(targetJob, targetStep, 0, configs, vars, pipeline, false)
 			if err != nil {
+				e.hasError = true
+				e.forceLogging = true // Force all logging when error occurs
+				// Create log file immediately when error occurs
+				if e.logFile == nil && (e.hasError || e.shouldCreateLogFile()) {
+					e.createLogFile()
+				}
 				return fmt.Errorf("subroutine job '%s' failed: %v", targetStep, err)
 			}
 			// Mark as executed to prevent re-execution in main flow
