@@ -27,8 +27,9 @@ type Config struct {
 	Var            map[string]interface{} `yaml:"var,omitempty"`
 	ProjectName    string                 `yaml:"project_name"`
 	LocalPath      string                 `yaml:"localPath"`
-	Devsync        Devsync                `yaml:"devsync"`
-	DirectAccess   DirectAccess           `yaml:"direct_access"`
+	// Devsync removed: keep backwards compatibility by allowing other fields
+	// to live at top-level. Use `DirectAccess` and `Var` for pipeline config.
+	DirectAccess DirectAccess `yaml:"direct_access"`
 }
 
 type SyncCollection struct {
@@ -36,17 +37,9 @@ type SyncCollection struct {
 	Files []string `yaml:"files"`
 }
 
-type Devsync struct {
-	OSTarget       string            `yaml:"os_target"`
-	SizeLimit      int               `yaml:"size_limit,omitempty"` // Size limit in MB, 0 = no limit, default 0 (no limit)
-	AgentName      string            `yaml:"agent_name,omitempty"` // Unique identifier for agent process
-	Auth           Auth              `yaml:"auth"`
-	Ignores        []string          `yaml:"ignores"`
-	AgentWatchs    []string          `yaml:"agent_watchs"`
-	ManualTransfer []string          `yaml:"manual_transfer"`
-	Script         Script            `yaml:"script"`
-	TriggerPerm    TriggerPermission `yaml:"trigger_permission"`
-}
+// Devsync type removed. Pipeline config should not include devsync-specific
+// fields. If users still have old configs, they should migrate to the
+// pipeline structure (see README).
 
 type Auth struct {
 	Username   string `yaml:"username"`
@@ -98,31 +91,9 @@ func ValidateConfig(cfg *Config) error {
 		validationErrors = append(validationErrors, "project_name cannot be empty")
 	}
 
-	// Validate auth configuration in devsync.auth
-	devsyncAuth := cfg.Devsync.Auth
-	if strings.TrimSpace(devsyncAuth.Username) == "" {
-		validationErrors = append(validationErrors, "devsync.auth.username cannot be empty")
-	}
-	if strings.TrimSpace(devsyncAuth.Host) == "" {
-		validationErrors = append(validationErrors, "devsync.auth.host cannot be empty")
-	}
-	if strings.TrimSpace(devsyncAuth.Port) == "" {
-		validationErrors = append(validationErrors, "devsync.auth.port cannot be empty")
-	} else {
-		// Validate port is a valid number
-		if port, err := strconv.Atoi(devsyncAuth.Port); err != nil || port <= 0 || port > 65535 {
-			validationErrors = append(validationErrors, "devsync.auth.port must be a valid number between 1-65535")
-		}
-	}
-	if strings.TrimSpace(devsyncAuth.RemotePath) == "" {
-		validationErrors = append(validationErrors, "devsync.auth.remotePath cannot be empty")
-	}
-	// Validate private key file exists (if not empty)
-	if strings.TrimSpace(devsyncAuth.PrivateKey) != "" {
-		if _, err := os.Stat(devsyncAuth.PrivateKey); os.IsNotExist(err) {
-			validationErrors = append(validationErrors, fmt.Sprintf("devsync.auth.privateKey file does not exist: %s", devsyncAuth.PrivateKey))
-		}
-	}
+	// NOTE: devsync-specific auth checks removed. Use DirectAccess.SSHConfigs
+	// and DirectAccess.SSHCommands for pipeline SSH setup. If you have old
+	// devsync-formatted configs, migrate them to the new structure.
 
 	// Validate local path exists
 	// if strings.TrimSpace(cfg.LocalPath) != "" {
@@ -189,10 +160,7 @@ func ValidateConfig(cfg *Config) error {
 		}
 	}
 
-	// Validate devsync settings
-	if strings.TrimSpace(cfg.Devsync.OSTarget) == "" {
-		validationErrors = append(validationErrors, "devsync.os_target cannot be empty")
-	}
+	// No global devsync settings to validate in pipeline mode.
 
 	// If there are validation errors, return them
 	if len(validationErrors) > 0 {
@@ -355,13 +323,8 @@ func LoadAndRenderConfig() (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("error resolving absolute path: %v", err)
 	}
-	renderedCfg.Devsync.Auth.LocalPath = absWatchPath
+	// Ensure LocalPath is set to the working directory for pipeline operations
 	renderedCfg.LocalPath = absWatchPath
-
-	// Set default values
-	if renderedCfg.Devsync.SizeLimit == 0 {
-		renderedCfg.Devsync.SizeLimit = 0 // Default: no limit
-	}
 
 	return renderedCfg, nil
 }
@@ -419,49 +382,9 @@ func RenderTemplateVariablesInMemory(cfg *Config) (*Config, error) {
 		}
 	}
 
-	// Render Devsync Auth fields
-	if strings.HasPrefix(renderedCfg.Devsync.Auth.Username, "=") {
-		oldValue := renderedCfg.Devsync.Auth.Username
-		renderedCfg.Devsync.Auth.Username = renderer.RenderComplexTemplates(renderedCfg.Devsync.Auth.Username)
-		printer.Printf("🔧 Rendered Devsync.Auth.Username: %s → %s\n", oldValue, renderedCfg.Devsync.Auth.Username)
-		renderCount++
-	}
-	if strings.HasPrefix(renderedCfg.Devsync.Auth.PrivateKey, "=") {
-		oldValue := renderedCfg.Devsync.Auth.PrivateKey
-		renderedCfg.Devsync.Auth.PrivateKey = renderer.RenderComplexTemplates(renderedCfg.Devsync.Auth.PrivateKey)
-		printer.Printf("🔧 Rendered Devsync.Auth.PrivateKey: %s → %s\n", oldValue, renderedCfg.Devsync.Auth.PrivateKey)
-		renderCount++
-	}
-	if strings.HasPrefix(renderedCfg.Devsync.Auth.Password, "=") {
-		oldValue := renderedCfg.Devsync.Auth.PrivateKey
-		renderedCfg.Devsync.Auth.Password = renderer.RenderComplexTemplates(renderedCfg.Devsync.Auth.Password)
-		printer.Printf("🔧 Rendered Devsync.Auth.PrivateKey: %s → %s\n", oldValue, renderedCfg.Devsync.Auth.Password)
-		renderCount++
-	}
-	if strings.HasPrefix(renderedCfg.Devsync.Auth.Host, "=") {
-		oldValue := renderedCfg.Devsync.Auth.Host
-		renderedCfg.Devsync.Auth.Host = renderer.RenderComplexTemplates(renderedCfg.Devsync.Auth.Host)
-		printer.Printf("🔧 Rendered Devsync.Auth.Host: %s → %s\n", oldValue, renderedCfg.Devsync.Auth.Host)
-		renderCount++
-	}
-	if strings.HasPrefix(renderedCfg.Devsync.Auth.Port, "=") {
-		oldValue := renderedCfg.Devsync.Auth.Port
-		renderedCfg.Devsync.Auth.Port = renderer.RenderComplexTemplates(renderedCfg.Devsync.Auth.Port)
-		printer.Printf("🔧 Rendered Devsync.Auth.Port: %s → %s\n", oldValue, renderedCfg.Devsync.Auth.Port)
-		renderCount++
-	}
-	if strings.HasPrefix(renderedCfg.Devsync.Auth.LocalPath, "=") {
-		oldValue := renderedCfg.Devsync.Auth.LocalPath
-		renderedCfg.Devsync.Auth.LocalPath = renderer.RenderComplexTemplates(renderedCfg.Devsync.Auth.LocalPath)
-		printer.Printf("🔧 Rendered Devsync.Auth.LocalPath: %s → %s\n", oldValue, renderedCfg.Devsync.Auth.LocalPath)
-		renderCount++
-	}
-	if strings.HasPrefix(renderedCfg.Devsync.Auth.RemotePath, "=") {
-		oldValue := renderedCfg.Devsync.Auth.RemotePath
-		renderedCfg.Devsync.Auth.RemotePath = renderer.RenderComplexTemplates(renderedCfg.Devsync.Auth.RemotePath)
-		printer.Printf("🔧 Rendered Devsync.Auth.RemotePath: %s → %s\n", oldValue, renderedCfg.Devsync.Auth.RemotePath)
-		renderCount++
-	}
+	// Devsync-specific auth rendering removed. For pipeline configs, SSH
+	// related templating is handled through DirectAccess.SSHConfigs and
+	// DirectAccess.SSHCommands (rendered above).
 
 	// Render SSH commands
 	for i := range renderedCfg.DirectAccess.SSHCommands {
@@ -859,13 +782,8 @@ func LoadAndRenderConfigWithPath(configPath string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("error resolving absolute path: %v", err)
 	}
-	renderedCfg.Devsync.Auth.LocalPath = absWatchPath
+	// Ensure LocalPath is set to the working directory for pipeline operations
 	renderedCfg.LocalPath = absWatchPath
-
-	// Set default values
-	if renderedCfg.Devsync.SizeLimit == 0 {
-		renderedCfg.Devsync.SizeLimit = 0 // Default: no limit
-	}
 
 	return renderedCfg, nil
 }
