@@ -19,6 +19,8 @@ A standalone CLI tool for executing automated pipeline workflows with interactiv
 - **Job Execution Tracking**: Visual indicators with HEAD markers for progress tracking
 - **SSH Integration**: Direct server access through configured SSH commands
 - **Configuration Management**: Flexible YAML-based configuration system
+- **Execution Validation**: Validates pipeline files, hosts, jobs, and variables before execution
+- **Key-Based Job Referencing**: Reference jobs by key for cleaner execution configurations
 
 ## Installation
 
@@ -134,6 +136,7 @@ direct_access:
     - name: "Deploy to Production"
       key: "prod-deploy"
       pipeline: "deploy.yaml"
+      jobs: ["build", "deploy"]  # Optional: specific jobs to run
       hosts: ["prod-server"]
       variables: {}
   ssh_configs:
@@ -232,6 +235,7 @@ Jobs in pipelines can be configured with execution modes to determine whether st
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
+| `key` | string | - | Unique key for referencing in executions (optional, falls back to `name`) |
 | `name` | string | - | Unique job identifier |
 | `depends_on` | []string | - | Jobs that must complete before this job runs |
 | `mode` | string | "remote" | Execution mode: `"local"` or `"remote"` |
@@ -276,6 +280,70 @@ jobs:
       - name: "restart-services"
         type: "command"
         commands: ["systemctl restart nginx", "systemctl restart app"]
+```
+
+## Execution Configuration
+
+Executions define how and when to run pipeline jobs. They provide validation and selective job execution.
+
+### Execution Configuration Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | - | Human-readable execution name |
+| `key` | string | - | Unique execution identifier |
+| `pipeline` | string | - | Pipeline YAML file to execute |
+| `jobs` | []string | - | Specific jobs to run (by key or name). If empty, runs all jobs |
+| `hosts` | []string | - | SSH host identifiers for remote execution |
+| `var` | string | - | Variable set key from vars.yaml |
+| `variables` | map | - | Direct variable overrides |
+
+### Job Referencing
+
+Jobs in executions can be referenced by `key` (recommended) or `name` (fallback):
+
+```yaml
+jobs:
+  - key: "build"
+    name: "Build Application"
+    steps: [...]
+  - key: "test"
+    name: "Run Tests"
+    depends_on: ["build"]
+    steps: [...]
+  - key: "deploy"
+    name: "Deploy to Production"
+    depends_on: ["test"]
+    steps: [...]
+
+executions:
+  - name: "Full Pipeline"
+    key: "full"
+    pipeline: "main.yaml"
+    jobs: ["build", "test", "deploy"]  # Reference by key
+
+  - name: "Deploy Only"
+    key: "deploy-only"
+    pipeline: "main.yaml"
+    jobs: ["deploy"]  # Run only deployment job
+```
+
+### Execution Validation
+
+Pipeline validates executions before running to catch configuration errors early:
+
+- **Pipeline file**: Must exist in `pipeline_dir`
+- **Hosts**: Must be defined in `ssh_configs`
+- **Jobs**: Must exist in the referenced pipeline (by key or name)
+- **Variables**: If `var` is specified, the key must exist in `vars.yaml`
+
+Invalid executions are rejected with clear error messages:
+
+```
+❌ Pipeline file 'missing.yaml' not found
+❌ Host 'unknown-server' not found in SSH configs
+❌ Job 'invalid-job' not found in pipeline 'main.yaml'
+❌ Vars key 'missing-env' not found in vars.yaml
 ```
 
 ## Step Configuration
