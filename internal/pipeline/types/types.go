@@ -22,6 +22,7 @@ type Pipeline struct {
 
 // Job represents a job within a pipeline
 type Job struct {
+	Key       string   `yaml:"key,omitempty"`    // unique key for referencing in executions
 	Name      string   `yaml:"name"`
 	DependsOn []string `yaml:"depends_on,omitempty"`
 	Mode      string   `yaml:"mode,omitempty"` // "local" or "remote" (default: "remote")

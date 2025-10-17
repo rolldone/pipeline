@@ -253,7 +253,7 @@ func (e *Executor) Execute(pipeline *types.Pipeline, execution *types.Execution,
 		return fmt.Errorf("execution is nil")
 	}
 	if execution.Jobs == nil {
-		return fmt.Errorf("execution.Jobs is nil")
+		execution.Jobs = []string{} // Initialize if nil
 	}
 
 	// Initialize subroutine tracking
@@ -374,14 +374,19 @@ func (e *Executor) resolveSSHConfigs(hosts []string, cfg *config.Config) ([]map[
 	return configs, nil
 }
 
-// findJob finds a job by name in pipeline
-func (e *Executor) findJob(pipeline *types.Pipeline, name string) (*types.Job, error) {
+// findJob finds a job by key (or name if key empty) in pipeline
+func (e *Executor) findJob(pipeline *types.Pipeline, keyOrName string) (*types.Job, error) {
 	for i, job := range pipeline.Jobs {
-		if job.Name == name {
+		// First try to match by key
+		if job.Key != "" && job.Key == keyOrName {
+			return &pipeline.Jobs[i], nil
+		}
+		// Fallback to name match
+		if job.Name == keyOrName {
 			return &pipeline.Jobs[i], nil
 		}
 	}
-	return nil, fmt.Errorf("job not found")
+	return nil, fmt.Errorf("job '%s' not found", keyOrName)
 }
 
 // runJob runs a job on all hosts

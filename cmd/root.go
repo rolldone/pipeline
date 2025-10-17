@@ -13,6 +13,8 @@ import (
 	"pipeline/internal/pipeline/types"
 	"pipeline/internal/util"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
 )
@@ -80,12 +82,78 @@ func newPipelineRunCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			// Load pipeline
+			// Initialize Jobs slice if nil
+			if execution.Jobs == nil {
+				execution.Jobs = make([]string, 0)
+			}
+
+			// Validate hosts exist in SSH configs
+			if len(execution.Hosts) > 0 {
+				hostMap := make(map[string]bool)
+				for _, sshConfig := range cfg.DirectAccess.SSHConfigs {
+					if host, ok := sshConfig["Host"].(string); ok {
+						hostMap[host] = true
+					}
+				}
+				for _, host := range execution.Hosts {
+					if !hostMap[host] {
+						fmt.Printf("❌ Host '%s' not found in SSH configs\n", host)
+						os.Exit(1)
+					}
+				}
+			}
+
+			// Validate var key exists in vars.yaml if specified
+			if execution.Var != "" {
+				varsPath := parser.ResolveVarsPath(cfg.DirectAccess.PipelineDir)
+				if _, err := os.Stat(varsPath); err == nil {
+					// vars.yaml exists, check if key exists
+					data, err := os.ReadFile(varsPath)
+					if err == nil {
+						var allVars map[string]types.Vars
+						if err := yaml.Unmarshal(data, &allVars); err == nil {
+							if _, exists := allVars[execution.Var]; !exists {
+								fmt.Printf("❌ Vars key '%s' not found in vars.yaml\n", execution.Var)
+								os.Exit(1)
+							}
+						}
+					}
+				} else {
+					fmt.Printf("❌ Vars file 'vars.yaml' not found\n")
+					os.Exit(1)
+				}
+			}
+
+			// Validate pipeline file exists
 			pipelinePath := filepath.Join(cfg.DirectAccess.PipelineDir, execution.Pipeline)
+			if _, err := os.Stat(pipelinePath); os.IsNotExist(err) {
+				fmt.Printf("❌ Pipeline file '%s' not found\n", execution.Pipeline)
+				os.Exit(1)
+			}
+
+			// Load pipeline
 			pipeline, err := parser.ParsePipeline(pipelinePath)
 			if err != nil {
 				fmt.Printf("❌ Failed to parse pipeline: %v\n", err)
 				os.Exit(1)
+			}
+
+			// Validate that all jobs in execution exist in pipeline
+			if len(execution.Jobs) > 0 {
+				jobMap := make(map[string]bool)
+				for _, job := range pipeline.Jobs {
+					key := job.Key
+					if key == "" {
+						key = job.Name // fallback to name if key is empty
+					}
+					jobMap[key] = true
+				}
+				for _, jobKey := range execution.Jobs {
+					if !jobMap[jobKey] {
+						fmt.Printf("❌ Job '%s' not found in pipeline '%s'\n", jobKey, execution.Pipeline)
+						os.Exit(1)
+					}
+				}
 			}
 
 			// Load vars with priority system:
