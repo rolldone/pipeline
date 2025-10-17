@@ -101,18 +101,16 @@ func TestRunRsyncStep_IncludesRenderWarningsInSaveOutput(t *testing.T) {
 		"stdout_tail":       stats.StdoutTail,
 		"stderr_tail":       stats.StderrTail,
 	}
-	// ensure render_warnings is included when present
-	renderWarnings := []map[string]string{{"file": "/tmp/src", "error": "simulated"}}
-	outMap["render_warnings"] = renderWarnings
+	// No render_warnings expected for rsync step after templating removal
 	b, _ := json.Marshal(outMap)
 	e.pipeline.ContextVariables[step.SaveOutput] = string(b)
 
-	// Verify presence of render_warnings in saved JSON
+	// Verify stats fields are present in saved JSON
 	var got map[string]interface{}
 	if err := json.Unmarshal([]byte(e.pipeline.ContextVariables[step.SaveOutput]), &got); err != nil {
 		t.Fatalf("failed to unmarshal saved json: %v", err)
 	}
-	if _, ok := got["render_warnings"]; !ok {
-		t.Fatalf("render_warnings not found in saved summary: %v", got)
+	if _, ok := got["files_transferred"]; !ok {
+		t.Fatalf("files_transferred not found in saved summary: %v", got)
 	}
 }

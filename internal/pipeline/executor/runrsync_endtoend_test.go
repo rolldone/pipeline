@@ -63,7 +63,7 @@ func TestRunRsyncStep_EndToEnd_RenderWarningsIncluded(t *testing.T) {
 		t.Fatalf("runRsyncStep failed: %v", err)
 	}
 
-	// Verify saved JSON contains render_warnings
+	// Verify saved JSON contains stats fields
 	raw, ok := e.pipeline.ContextVariables[step.SaveOutput]
 	if !ok {
 		t.Fatalf("no save_output found at %s", step.SaveOutput)
@@ -72,12 +72,7 @@ func TestRunRsyncStep_EndToEnd_RenderWarningsIncluded(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &m); err != nil {
 		t.Fatalf("failed to parse saved json: %v", err)
 	}
-	if rw, ok := m["render_warnings"]; !ok {
-		t.Fatalf("render_warnings not present in saved json: %v", m)
-	} else {
-		slice, ok := rw.([]interface{})
-		if !ok || len(slice) == 0 {
-			t.Fatalf("render_warnings is empty or wrong type: %v", rw)
-		}
+	if _, ok := m["files_transferred"]; !ok {
+		t.Fatalf("files_transferred not present in saved json: %v", m)
 	}
 }

@@ -1,0 +1,59 @@
+# Sample pipeline showing write_file usage
+
+variables:
+  app_name: "example-app"
+  host_target: "web-01"
+
+jobs:
+  - name: write-single-file
+    hosts:
+      - "{{host_target}}"
+    steps:
+      - name: generate-config
+        type: command
+        mode: local
+        file: |
+          mkdir -p out/
+          echo "port: 8080\nname: {{app_name}}" > out/config.yml
+
+      - name: push-config
+        type: write_file
+        mode: remote
+        template: disabled
+        files:
+          - source: out/config.yml
+            destination: /etc/{{app_name}}/config.yml
+            perm: "0644"
+        save_output: write.config.result
+
+  - name: write-multiple-files
+    hosts:
+      - "{{host_target}}"
+    steps:
+      - name: prepare-files
+        type: command
+        mode: local
+        file: |
+          mkdir -p build/
+          echo "<html><body>Hello {{app_name}}</body></html>" > build/index.html
+          echo "log config for {{app_name}}" > build/log.conf
+
+      - name: push-site-files
+        type: write_file
+        mode: remote
+        template: enabled
+        files:
+          - source: build/index.html
+            destination: /var/www/{{app_name}}/index.html
+            perm: "0644"
+            template: enabled
+          - source: build/log.conf
+            destination: /etc/{{app_name}}/log.conf
+            perm: "0600"
+            template: enabled
+        save_output: write.site.result
+
+# Notes:
+# - `overwrite: if-different` will attempt to compare target checksum before overwriting.
+# - `mode: remote` uses SSH to upload; ensure SSH config is available for the host.
+# - `save_output` will contain a simple JSON summary (exit_code, reason, files_written, optional render_warnings).

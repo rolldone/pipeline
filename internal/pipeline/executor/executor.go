@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +34,10 @@ type Executor struct {
 	WriteFileFunc func(filename string, data []byte, perm os.FileMode) error
 	// ExecCommand allows tests to inject a fake command runner; defaults to exec.Command
 	ExecCommand func(name string, arg ...string) *exec.Cmd
+	// NewSSHClient allows tests to inject a fake SSH client factory. By default
+	// it uses sshclient.NewPersistentSSHClient and returns a concrete client
+	// that satisfies the SSHClient interface below.
+	NewSSHClient func(username, privateKeyPath, password, host, port string) (SSHClient, error)
 }
 
 // NewExecutor creates a new executor
@@ -43,6 +48,27 @@ func NewExecutor() *Executor {
 		WriteFileFunc:        os.WriteFile,
 		ExecCommand:          exec.Command,
 	}
+}
+
+// ensureDefaults fills default factories that rely on external packages
+func (e *Executor) ensureDefaults() {
+	if e.NewSSHClient == nil {
+		e.NewSSHClient = func(username, privateKeyPath, password, host, port string) (SSHClient, error) {
+			return sshclient.NewPersistentSSHClient(username, privateKeyPath, password, host, port)
+		}
+	}
+}
+
+// SSHClient is the minimal interface used by executor when talking to SSH.
+// Placed here to allow tests to provide mocks without changing the sshclient
+// package.
+type SSHClient interface {
+	Connect() error
+	Close() error
+	UploadBytes(data []byte, remotePath string, perm os.FileMode) error
+	UploadFile(localPath, remotePath string) error
+	DownloadFile(localPath, remotePath string) error
+	RunCommand(cmd string) error
 }
 
 // writeLog writes a message to the log file (lazy initialization)
@@ -495,22 +521,10 @@ func (e *Executor) runRsyncStep(step *types.Step, job *types.Job, config map[str
 		return err
 	}
 
-	// Pre-render templated files (if any) into a temp directory so rsync can sync rendered content.
-	// This preserves the original destination mapping but uses temp sources for rsync.
-	preparedEntries, cleanup, renderWarnings, err := e.prepareRsyncEntriesWithTemplates(step, rawEntries, vars)
-	if err != nil {
-		return err
-	}
-	// ensure temp files/directories are removed after rsync operations
-	defer func() {
-		if cleanup != nil {
-			cleanup()
-		}
-	}()
-
-	// Convert prepared entries to simple source/destination pairs for rsync helper
-	entries := make([]struct{ Source, Destination string }, 0, len(preparedEntries))
-	for _, r := range preparedEntries {
+	// For rsync steps we DO NOT pre-render templates. Use the raw entries directly
+	// (rendering for files is handled by the write_file step instead).
+	entries := make([]struct{ Source, Destination string }, 0, len(rawEntries))
+	for _, r := range rawEntries {
 		entries = append(entries, struct{ Source, Destination string }{Source: r.Source, Destination: r.Destination})
 	}
 
@@ -703,9 +717,7 @@ func (e *Executor) runRsyncStep(step *types.Step, job *types.Job, config map[str
 					"stdout_tail":       stats.StdoutTail,
 					"stderr_tail":       stats.StderrTail,
 				}
-				if len(renderWarnings) > 0 {
-					outMap["render_warnings"] = renderWarnings
-				}
+				// render_warnings removed for rsync step (templating handled by write_file)
 				if b, jerr := json.Marshal(outMap); jerr == nil {
 					e.pipeline.ContextVariables[step.SaveOutput] = string(b)
 				}
@@ -730,12 +742,134 @@ func (e *Executor) runRsyncStep(step *types.Step, job *types.Job, config map[str
 				"stdout_tail":       stats.StdoutTail,
 				"stderr_tail":       stats.StderrTail,
 			}
-			if len(renderWarnings) > 0 {
-				outMap["render_warnings"] = renderWarnings
-			}
+			// render_warnings removed for rsync step (templating handled by write_file)
 			if b, jerr := json.Marshal(outMap); jerr == nil {
 				e.pipeline.ContextVariables[step.SaveOutput] = string(b)
 			}
+		}
+	}
+
+	return nil
+}
+
+// runWriteFileStep implements the `write_file` step: render files (tolerant), upload them (upload-from-memory for rendered content),
+// apply default perms when unspecified (0755), and save a simple summary to pipeline.ContextVariables[step.SaveOutput] when requested.
+func (e *Executor) runWriteFileStep(step *types.Step, job *types.Job, config map[string]interface{}, vars types.Vars) error {
+	// Expand file entries
+	rawEntries, err := e.buildFileTransferEntries(step, vars)
+	if err != nil {
+		return err
+	}
+
+	// Prepare rendering/staging: render files into temp when templating is enabled.
+	prepared, cleanup, renderWarnings, err := e.prepareRenderAndStage(step, rawEntries, vars)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if cleanup != nil {
+			cleanup()
+		}
+	}()
+
+	// Setup SSH client for remote uploads (or use local mode)
+	jobMode := job.Mode
+	if jobMode == "" {
+		jobMode = "remote"
+	}
+
+	filesWritten := []string{}
+	start := time.Now()
+
+	if jobMode == "local" {
+		// Local mode: copy staged/prepared files to destination
+		for _, p := range prepared {
+			// prepared.Source points to staged temp file if rendering occurred; otherwise original source
+			src := p.Source
+			dst := p.Destination
+			// Ensure dest dir exists
+			if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+				return fmt.Errorf("failed to create destination dir: %v", err)
+			}
+			data, rerr := os.ReadFile(src)
+			if rerr != nil {
+				return fmt.Errorf("failed to read prepared file %s: %v", src, rerr)
+			}
+			// Determine perm from step.Files if present
+			permStr := e.getPermForEntry(step, src, dst)
+			perm := os.FileMode(0755)
+			if permStr != "" {
+				if v, perr := strconv.ParseUint(permStr, 8, 32); perr == nil {
+					perm = os.FileMode(v)
+				}
+			}
+			if werr := e.WriteFileFunc(dst, data, perm); werr != nil {
+				return fmt.Errorf("failed to write local destination %s: %v", dst, werr)
+			}
+			filesWritten = append(filesWritten, dst)
+		}
+	} else {
+		// Remote mode: use SSH client
+		host, _ := config["HostName"].(string)
+		if host == "" {
+			host, _ = config["Host"].(string)
+		}
+		user, _ := config["User"].(string)
+		port, _ := config["Port"].(string)
+		if port == "" {
+			port = "22"
+		}
+		privateKey, _ := config["IdentityFile"].(string)
+		password, _ := config["Password"].(string)
+
+		e.ensureDefaults()
+		client, err := e.NewSSHClient(user, privateKey, password, host, port)
+		if err != nil {
+			return fmt.Errorf("failed to create SSH client: %v", err)
+		}
+		if err := client.Connect(); err != nil {
+			return fmt.Errorf("failed to connect SSH client: %v", err)
+		}
+		defer client.Close()
+
+		for _, p := range prepared {
+			src := p.Source
+			dst := p.Destination
+			// If prepared.Source points to a temp staged file, read bytes and UploadBytes; else if not rendered, UploadFile
+			data, rerr := os.ReadFile(src)
+			if rerr != nil {
+				return fmt.Errorf("failed to read file %s: %v", src, rerr)
+			}
+			// Determine perm
+			permStr := e.getPermForEntry(step, src, dst)
+			perm := os.FileMode(0755)
+			if permStr != "" {
+				if v, perr := strconv.ParseUint(permStr, 8, 32); perr == nil {
+					perm = os.FileMode(v)
+				}
+			}
+
+			if err := client.UploadBytes(data, dst, perm); err != nil {
+				return fmt.Errorf("failed to upload %s: %v", dst, err)
+			}
+			filesWritten = append(filesWritten, dst)
+		}
+	}
+
+	duration := int(time.Since(start).Seconds())
+	// Save output summary if requested
+	if step.SaveOutput != "" && e.pipeline != nil {
+		outMap := map[string]interface{}{
+			"exit_code":        0,
+			"reason":           "success",
+			"duration_seconds": duration,
+			"files_written":    filesWritten,
+		}
+		if len(renderWarnings) > 0 {
+			outMap["render_warnings"] = renderWarnings
+		}
+		if b, jerr := json.Marshal(outMap); jerr == nil {
+			e.pipeline.ContextVariables[step.SaveOutput] = string(b)
 		}
 	}
 
@@ -772,7 +906,8 @@ func (e *Executor) runCommandStep(step *types.Step, job *types.Job, config map[s
 	password, _ := config["Password"].(string)
 
 	// Create SSH client
-	client, err := sshclient.NewPersistentSSHClient(user, privateKey, password, host, port)
+	e.ensureDefaults()
+	client, err := e.NewSSHClient(user, privateKey, password, host, port)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to create SSH client: %v", err)
 	}
@@ -780,6 +915,13 @@ func (e *Executor) runCommandStep(step *types.Step, job *types.Job, config map[s
 		return "", "", fmt.Errorf("failed to connect SSH client: %v", err)
 	}
 	defer client.Close()
+
+	// runCommandInteractive requires the concrete *sshclient.SSHClient. Attempt
+	// a type assertion; if it fails we can't run interactive commands.
+	concreteClient, ok := client.(*sshclient.SSHClient)
+	if !ok {
+		return "", "", fmt.Errorf("ssh client does not support interactive commands")
+	}
 
 	// Determine working directory
 	workingDir := e.interpolateString(step.WorkingDir, vars)
@@ -813,7 +955,7 @@ func (e *Executor) runCommandStep(step *types.Step, job *types.Job, config map[s
 		fmt.Printf("Running on %s: %s\n", host, fullCmd)
 
 		// Run command with interactive support and timeout
-		output, err := e.runCommandInteractive(client, fullCmd, step.Expect, vars, timeout, idleTimeout, step.Silent, step, job)
+		output, err := e.runCommandInteractive(concreteClient, fullCmd, step.Expect, vars, timeout, idleTimeout, step.Silent, step, job)
 		if err != nil {
 			// flush evidence into pipeline log before returning
 			e.flushErrorEvidenceAll()
@@ -938,7 +1080,8 @@ func (e *Executor) runFileTransferStep(step *types.Step, job *types.Job, config 
 	password, _ := config["Password"].(string)
 
 	// Create SSH client
-	client, err := sshclient.NewPersistentSSHClient(user, privateKey, password, host, port)
+	e.ensureDefaults()
+	client, err := e.NewSSHClient(user, privateKey, password, host, port)
 	if err != nil {
 		return fmt.Errorf("failed to create SSH client: %v", err)
 	}
@@ -983,22 +1126,17 @@ func (e *Executor) runFileTransferStep(step *types.Step, job *types.Job, config 
 			}
 			interpolatedContent := e.interpolateString(string(content), vars)
 
-			// Create temporary file with interpolated content
-			tempFile, err := os.CreateTemp("", "pipeline-upload-*")
-			if err != nil {
-				return fmt.Errorf("failed to create temp file: %v", err)
+			// Determine permission to send: prefer per-file perm from step.Files if present; else default 0755
+			permToUse := os.FileMode(0755)
+			if ps := e.getPermForEntry(step, src, dst); ps != "" {
+				if v, perr := strconv.ParseUint(ps, 8, 32); perr == nil {
+					permToUse = os.FileMode(v)
+				}
 			}
-			defer os.Remove(tempFile.Name())
-			defer tempFile.Close()
 
-			if _, err := tempFile.WriteString(interpolatedContent); err != nil {
-				return fmt.Errorf("failed to write temp file: %v", err)
-			}
-			tempFile.Close()
-
-			// Upload interpolated temp file using SCP
+			// Upload bytes directly (no temp file)
 			fmt.Printf("Uploading %s (rendered) to %s:%s\n", src, host, dst)
-			if err := client.UploadFile(tempFile.Name(), dst); err != nil {
+			if err := client.UploadBytes([]byte(interpolatedContent), dst, permToUse); err != nil {
 				return fmt.Errorf("failed to upload file: %v", err)
 			}
 		} else {
@@ -1010,6 +1148,63 @@ func (e *Executor) runFileTransferStep(step *types.Step, job *types.Job, config 
 		}
 	}
 	return nil
+}
+
+// getPermForEntry returns the perm string from step.Files matching src->dst if available
+func (e *Executor) getPermForEntry(step *types.Step, src, dst string) string {
+	if step == nil {
+		return ""
+	}
+	// Prepare some derived values for matching
+	srcBase := filepath.Base(src)
+	dstBase := filepath.Base(dst)
+
+	for _, f := range step.Files {
+		// direct exact matches first
+		if f.Source == src {
+			if f.Destination == "" || f.Destination == dst || strings.HasSuffix(dst, f.Destination) || filepath.Base(f.Destination) == dstBase {
+				return f.Perm
+			}
+		}
+
+		// match destination-centric rules
+		if f.Destination == dst || strings.HasSuffix(dst, f.Destination) || filepath.Base(f.Destination) == dstBase {
+			// if destination matches, prefer matching source by basename or glob
+			if f.Source == src || filepath.Base(f.Source) == srcBase || strings.HasSuffix(src, filepath.Base(f.Source)) {
+				return f.Perm
+			}
+			if strings.ContainsAny(f.Source, "*?[") {
+				if ok, _ := filepath.Match(f.Source, src); ok {
+					return f.Perm
+				}
+				if ok, _ := filepath.Match(f.Source, srcBase); ok {
+					return f.Perm
+				}
+			}
+		}
+
+		// fallback: match by basename of the source (covers rendered/staged temp files)
+		if filepath.Base(f.Source) == srcBase {
+			return f.Perm
+		}
+
+		// fallback: if FileEntry.Source is a glob, try matching against src and srcBase
+		if strings.ContainsAny(f.Source, "*?[") {
+			if ok, _ := filepath.Match(f.Source, src); ok {
+				return f.Perm
+			}
+			if ok, _ := filepath.Match(f.Source, srcBase); ok {
+				return f.Perm
+			}
+		}
+
+		// as a last attempt, compare against interpolated form (context-only interpolation)
+		interp := e.interpolateString(f.Source, nil)
+		if interp == src || filepath.Base(interp) == srcBase {
+			return f.Perm
+		}
+	}
+	return ""
 }
 
 // buildFileTransferEntries builds an expanded list of file entries from step.Files, step.Sources or step.Source
@@ -1927,11 +2122,13 @@ func (e *Executor) copyGlobPattern(pattern, destination string) error {
 }
 
 // copyGlobPattern handles glob patterns like src/**/*.js
-func (e *Executor) prepareRsyncEntriesWithTemplates(step *types.Step, rawEntries []struct {
+func (e *Executor) prepareRenderAndStage(step *types.Step, rawEntries []struct {
 	Source      string
 	Destination string
 	Template    string
 }, vars types.Vars) ([]struct{ Source, Destination string }, func(), []map[string]string, error) {
+	// Reuse the existing implementation here (kept local to ease refactor).
+	// The body below mirrors previous prepareRsyncEntriesWithTemplates logic.
 	type entry struct{ Source, Destination string }
 	var out []entry
 
@@ -1959,9 +2156,9 @@ func (e *Executor) prepareRsyncEntriesWithTemplates(step *types.Step, rawEntries
 	// Ensure base temp dir exists
 	os.MkdirAll(e.tempDir, 0755)
 
-	tmpBase, err := os.MkdirTemp(e.tempDir, "rsync_render_")
+	tmpBase, err := os.MkdirTemp(e.tempDir, "render_stage_")
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to create temp dir for rsync rendering: %v", err)
+		return nil, nil, nil, fmt.Errorf("failed to create temp dir for rendering: %v", err)
 	}
 
 	cleanup := func() {
@@ -1995,6 +2192,7 @@ func (e *Executor) prepareRsyncEntriesWithTemplates(step *types.Step, rawEntries
 				relPath, _ := filepath.Rel(srcPath, path)
 				target := filepath.Join(destDir, relPath)
 				if info.IsDir() {
+					// directories default to 0755
 					return os.MkdirAll(target, 0755)
 				}
 				data, rerr := os.ReadFile(path)
@@ -2006,19 +2204,21 @@ func (e *Executor) prepareRsyncEntriesWithTemplates(step *types.Step, rawEntries
 					if isTextBytes(data) {
 						content := string(data)
 						rendered := e.interpolateString(content, vars)
-						if werr := e.WriteFileFunc(target, []byte(rendered), info.Mode()); werr != nil {
+						// write staged file with default 0755 as requested
+						writePerm := os.FileMode(0755)
+						if werr := e.WriteFileFunc(target, []byte(rendered), writePerm); werr != nil {
 							// tolerate write error: fallback to original bytes and record a warning
-							_ = e.WriteFileFunc(target, data, info.Mode())
+							_ = e.WriteFileFunc(target, data, writePerm)
 							renderWarnings = append(renderWarnings, map[string]string{"file": path, "error": werr.Error()})
 						}
 					} else {
 						// binary file - copy as-is
-						if werr := e.WriteFileFunc(target, data, info.Mode()); werr != nil {
+						if werr := e.WriteFileFunc(target, data, 0755); werr != nil {
 							return werr
 						}
 					}
 				} else {
-					if werr := e.WriteFileFunc(target, data, info.Mode()); werr != nil {
+					if werr := e.WriteFileFunc(target, data, 0755); werr != nil {
 						return werr
 					}
 				}
@@ -2040,13 +2240,13 @@ func (e *Executor) prepareRsyncEntriesWithTemplates(step *types.Step, rawEntries
 			if stepTemplateEnabled && isTextBytes(data) {
 				content := string(data)
 				rendered := e.interpolateString(content, vars)
-				if werr := e.WriteFileFunc(target, []byte(rendered), info.Mode()); werr != nil {
+				if werr := e.WriteFileFunc(target, []byte(rendered), 0755); werr != nil {
 					// tolerate write error: fallback to original bytes and record a warning
-					_ = e.WriteFileFunc(target, data, info.Mode())
+					_ = e.WriteFileFunc(target, data, 0755)
 					renderWarnings = append(renderWarnings, map[string]string{"file": srcPath, "error": werr.Error()})
 				}
 			} else {
-				if werr := e.WriteFileFunc(target, data, info.Mode()); werr != nil {
+				if werr := e.WriteFileFunc(target, data, 0755); werr != nil {
 					cleanup()
 					return nil, nil, renderWarnings, fmt.Errorf("failed to write temp file %s: %v", target, werr)
 				}
@@ -2071,4 +2271,13 @@ func (e *Executor) prepareRsyncEntriesWithTemplates(step *types.Step, rawEntries
 		}
 	}
 	return ret, cleanup, renderWarnings, nil
+}
+
+// prepareRsyncEntriesWithTemplates kept as compatibility shim that calls the new helper
+func (e *Executor) prepareRsyncEntriesWithTemplates(step *types.Step, rawEntries []struct {
+	Source      string
+	Destination string
+	Template    string
+}, vars types.Vars) ([]struct{ Source, Destination string }, func(), []map[string]string, error) {
+	return e.prepareRenderAndStage(step, rawEntries, vars)
 }

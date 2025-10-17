@@ -327,6 +327,174 @@ func (c *SSHClient) UploadFile(localPath, remotePath string) error {
 	return nil
 }
 
+// UploadBytes uploads data bytes to remotePath using scp protocol without requiring a local temp file.
+func (c *SSHClient) UploadBytes(data []byte, remotePath string, perm os.FileMode) error {
+	if c.client == nil {
+		return fmt.Errorf("SSH client not connected")
+	}
+
+	// Detect Windows-style remote as in UploadFile
+	isWindowsRemote := false
+	if (len(remotePath) >= 3 && remotePath[1] == ':' && (remotePath[2] == '\\' || remotePath[2] == '/')) || strings.HasPrefix(remotePath, "\\\\") {
+		isWindowsRemote = true
+	}
+
+	var remotePathForScp string
+	if isWindowsRemote {
+		remotePathForScp = remotePath
+	} else {
+		remotePath = strings.ReplaceAll(remotePath, "\\", "/")
+		remotePath = path.Clean(remotePath)
+		remotePathForScp = remotePath
+	}
+
+	// Create remote directory similar to UploadFile
+	if isWindowsRemote {
+		idx := strings.LastIndexAny(remotePathForScp, "\\/")
+		var remoteDir string
+		if idx == -1 {
+			remoteDir = "."
+		} else {
+			remoteDir = remotePathForScp[:idx]
+		}
+		mkdirCmd := fmt.Sprintf("cmd.exe /C if not exist \"%s\" mkdir \"%s\"", remoteDir, remoteDir)
+		if err := c.RunCommand(mkdirCmd); err != nil {
+			return fmt.Errorf("failed to create remote directory (windows): %v", err)
+		}
+	} else {
+		remoteDir := path.Dir(remotePathForScp)
+		mkdirCmd := fmt.Sprintf("mkdir -p '%s'", remoteDir)
+		if err := c.RunCommand(mkdirCmd); err != nil {
+			return fmt.Errorf("failed to create remote directory: %v", err)
+		}
+	}
+
+	session, err := c.client.NewSession()
+	if err != nil {
+		return fmt.Errorf("failed to create session: %v", err)
+	}
+	defer session.Close()
+
+	stdin, err := session.StdinPipe()
+	if err != nil {
+		session.Close()
+		return fmt.Errorf("failed to get stdin pipe: %v", err)
+	}
+	stdout, err := session.StdoutPipe()
+	if err != nil {
+		session.Close()
+		return fmt.Errorf("failed to get stdout pipe: %v", err)
+	}
+	stderr, err := session.StderrPipe()
+	if err != nil {
+		session.Close()
+		return fmt.Errorf("failed to get stderr pipe: %v", err)
+	}
+
+	// Start scp -t on target dir
+	if isWindowsRemote {
+		idx := strings.LastIndexAny(remotePathForScp, "\\/")
+		var targetDir string
+		if idx == -1 {
+			targetDir = "."
+		} else {
+			targetDir = remotePathForScp[:idx]
+		}
+		targetDir = strings.ReplaceAll(targetDir, "\\", "/")
+		cmd := fmt.Sprintf("scp -t %s", fmt.Sprintf("\"%s\"", targetDir))
+		if err := session.Start(cmd); err != nil {
+			session.Close()
+			return fmt.Errorf("failed to start scp on remote: %v", err)
+		}
+	} else {
+		targetDir := path.Dir(remotePathForScp)
+		cmd := fmt.Sprintf("scp -t %s", shellEscape(targetDir))
+		if err := session.Start(cmd); err != nil {
+			session.Close()
+			return fmt.Errorf("failed to start scp on remote: %v", err)
+		}
+	}
+
+	// helper to read ack
+	readAck := func() error {
+		buf := make([]byte, 1)
+		ch := make(chan error, 1)
+		go func() {
+			if _, err := stdout.Read(buf); err != nil {
+				ch <- fmt.Errorf("failed to read scp ack: %v", err)
+				return
+			}
+			switch buf[0] {
+			case 0:
+				ch <- nil
+			case 1, 2:
+				msg := make([]byte, 2048)
+				n, _ := stderr.Read(msg)
+				ch <- fmt.Errorf("scp remote error: %s", strings.TrimSpace(string(msg[:n])))
+			default:
+				ch <- fmt.Errorf("unknown scp ack: %v", buf[0])
+			}
+		}()
+		select {
+		case err := <-ch:
+			return err
+		case <-time.After(10 * time.Second):
+			return fmt.Errorf("timeout waiting for scp ack")
+		}
+	}
+
+	if err := readAck(); err != nil {
+		stdin.Close()
+		session.Wait()
+		return err
+	}
+
+	// compute filename
+	var filename string
+	if isWindowsRemote {
+		idx := strings.LastIndexAny(remotePathForScp, "\\/")
+		if idx == -1 {
+			filename = remotePathForScp
+		} else {
+			filename = remotePathForScp[idx+1:]
+		}
+	} else {
+		filename = path.Base(remotePathForScp)
+	}
+
+	// send header with perm and size
+	fmt.Fprintf(stdin, "C%04o %d %s\n", perm.Perm(), len(data), filename)
+	if err := readAck(); err != nil {
+		stdin.Close()
+		session.Wait()
+		return err
+	}
+
+	// send data
+	if _, err := io.Copy(stdin, bytes.NewReader(data)); err != nil {
+		stdin.Close()
+		session.Wait()
+		return fmt.Errorf("failed to send file data: %v", err)
+	}
+	if _, err := fmt.Fprint(stdin, "\x00"); err != nil {
+		stdin.Close()
+		session.Wait()
+		return fmt.Errorf("failed to send scp terminator: %v", err)
+	}
+	if err := readAck(); err != nil {
+		stdin.Close()
+		session.Wait()
+		return err
+	}
+
+	stdin.Close()
+	if err := session.Wait(); err != nil {
+		return fmt.Errorf("remote scp command failed: %v", err)
+	}
+
+	return nil
+}
+
 // SyncFile is an alias for UploadFile for backward compatibility
 func (c *SSHClient) SyncFile(localPath, remotePath string) error {
 	return c.UploadFile(localPath, remotePath)
