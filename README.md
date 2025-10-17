@@ -91,7 +91,7 @@ Linux / macOS (one-liner to download and install from a release URL example):
 # adjust URL to the actual release asset
 curl -L -o /tmp/pipeline.tar.gz https://github.com/rolldone/pipeline/releases/download/vX.Y.Z/pipeline-linux-amd64.tar.gz
 tar -xzf /tmp/pipeline.tar.gz -C /tmp
-sudo mv /tmp/pipeline /usr/local/bin/pipeline
+sudo cp /tmp/pipeline /usr/local/bin/pipeline
 sudo chmod +x /usr/local/bin/pipeline
 ```
 

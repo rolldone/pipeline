@@ -15,7 +15,6 @@ import (
 
 	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
-	"gopkg.in/yaml.v3"
 )
 
 var (
@@ -269,17 +268,23 @@ func runPipelineInit() {
 		return
 	}
 
-	// Find pipeline-sample.yaml in executable directory
+	// Find pipeline-sample.yaml - check current directory first, then executable directory
 	var sampleFile string
 	var foundSample bool
 
-	// Get executable directory and look for pipeline-sample.yaml there
-	if exePath, err := os.Executable(); err == nil {
-		exeDir := filepath.Dir(exePath)
-		projectSample := filepath.Join(exeDir, "pipeline-sample.yaml")
-		if _, err := os.Stat(projectSample); err == nil {
-			sampleFile = projectSample
-			foundSample = true
+	// Check current directory first
+	if _, err := os.Stat("pipeline-sample.yaml"); err == nil {
+		sampleFile = "pipeline-sample.yaml"
+		foundSample = true
+	} else {
+		// Get executable directory and look for pipeline-sample.yaml there
+		if exePath, err := os.Executable(); err == nil {
+			exeDir := filepath.Dir(exePath)
+			projectSample := filepath.Join(exeDir, "pipeline-sample.yaml")
+			if _, err := os.Stat(projectSample); err == nil {
+				sampleFile = projectSample
+				foundSample = true
+			}
 		}
 	}
 
@@ -298,21 +303,8 @@ func runPipelineInit() {
 		return
 	}
 
-	// Parse and re-marshal to ensure clean YAML
-	var cfg config.Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		fmt.Printf("❌ Error parsing pipeline-sample.yaml: %v\n", err)
-		return
-	}
-
-	// Write pipeline.yaml
-	outputData, err := yaml.Marshal(&cfg)
-	if err != nil {
-		fmt.Printf("❌ Error generating config: %v\n", err)
-		return
-	}
-
-	if err := os.WriteFile("pipeline.yaml", outputData, 0644); err != nil {
+	// Write pipeline.yaml directly from sample file (avoid parsing through Config struct which has extra fields)
+	if err := os.WriteFile("pipeline.yaml", data, 0644); err != nil {
 		fmt.Printf("❌ Error writing pipeline.yaml: %v\n", err)
 		return
 	}
