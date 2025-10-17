@@ -71,18 +71,13 @@ func TestRunWriteFileStep_LocalRenderAndDefaultPerm(t *testing.T) {
 		t.Fatalf("expected out1.txt to be written, keys: %v", written)
 	}
 
-	// check save_output present and contains files_written
+	// check save_output present and contains rendered content directly
 	raw := p.ContextVariables[step.SaveOutput]
 	if raw == "" {
 		t.Fatalf("expected save_output variable set")
 	}
-	var out map[string]interface{}
-	if err := json.Unmarshal([]byte(raw), &out); err != nil {
-		t.Fatalf("invalid json in save_output: %v", err)
-	}
-	fw, ok := out["files_written"].([]interface{})
-	if !ok || len(fw) != 1 {
-		t.Fatalf("expected files_written array with 1 element, got %#v", out["files_written"])
+	if raw != "Hello alice!\n" {
+		t.Fatalf("expected rendered content 'Hello alice!\\n', got %q", raw)
 	}
 }
 

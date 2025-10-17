@@ -555,10 +555,32 @@ Key points:
 - Renders file contents using the same `{{var}}` interpolation logic when `template: "enabled"` is set at the step level.
 - Uploads rendered content from memory (no temporary intermediate remote file required) using the in-memory uploader. This minimizes local disk churn and avoids leaving partially rendered files on the remote host.
 - Default file permission: when a per-file `perm` is not specified, the executor uses `0755` as the default mode for written/uploaded files.
+- **Automatic variable storage**: For single files, rendered content is automatically saved to pipeline context variables without requiring `save_output` configuration.
+- **Memory-only operation**: Single file operations avoid temporary file creation entirely - content is rendered and stored directly in memory.
+- Variable naming: Auto-generated from step name (spaces/hyphens converted to underscores), also accessible via original step name.
 - Tolerant rendering: if the executor cannot stage a rendered file (for example, due to a local write error when preparing staged copies), it will fall back to using the original file bytes and record a `render_warnings` entry in the step's saved output (if `save_output` is set).
-- `save_output` for `write_file` stores a concise JSON summary with fields: `exit_code`, `reason`, `duration_seconds`, and `files_written`. If render fallbacks occurred, a `render_warnings` array is also included.
+- `save_output` for `write_file` with multiple files stores a concise JSON summary with fields: `exit_code`, `reason`, `duration_seconds`, and `files_written`. If render fallbacks occurred, a `render_warnings` array is also included.
+- `save_output` for `write_file` with single file stores the rendered content directly to the context variable (in-memory, no disk usage).
+- `execute_after_write` executes the uploaded file immediately after writing (single file only, executes first file if multiple).
 
-Example (render locally then upload rendered bytes to remote):
+Example (automatic variable storage - no save_output needed):
+
+```yaml
+- name: "load-script"
+  type: "write_file"
+  template: "enabled"
+  files:
+    - source: "scripts/deploy.sh"
+      destination: "/tmp/deploy.sh"
+
+# Rendered content automatically available in variable "load_script" and "load-script"
+# Use in subsequent steps:
+- name: "execute-script"
+  type: "command"
+  commands: ["echo '{{load_script}}' | bash"]
+```
+
+Example (explicit save_output for custom variable name):
 
 ```yaml
 - name: "deploy-config"
@@ -567,7 +589,35 @@ Example (render locally then upload rendered bytes to remote):
   files:
     - source: "config/app.conf"
       destination: "/etc/myapp/app.conf"
-  save_output: "write_summary"
+  save_output: "my_custom_config"
+
+# Rendered content available in variable "my_custom_config"
+```
+
+Example (multiple files - requires save_output for summary):
+
+```yaml
+- name: "deploy-site"
+  type: "write_file"
+  template: "enabled"
+  files:
+    - source: "site/index.html"
+      destination: "/var/www/index.html"
+    - source: "site/config.js"
+      destination: "/var/www/config.js"
+  save_output: "deploy_summary"
+```
+
+Example (write and execute script directly):
+
+```yaml
+- name: "deploy-script"
+  type: "write_file"
+  template: "enabled"
+  files:
+    - source: "scripts/deploy.sh"
+      destination: "/tmp/deploy.sh"
+  execute_after_write: true
 ```
 
 Notes:

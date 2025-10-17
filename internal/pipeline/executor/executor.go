@@ -166,18 +166,50 @@ func (e *Executor) shouldCreateLogFile() bool {
 		return true
 	}
 	// Check all jobs
-	for _, job := range e.pipeline.Jobs {
-		if job.LogOutput != nil && *job.LogOutput {
-			return true
-		}
-		// Check all steps in job
-		for _, step := range job.Steps {
-			if step.LogOutput != nil && *step.LogOutput {
+	if e.pipeline != nil {
+		for _, job := range e.pipeline.Jobs {
+			if job.LogOutput != nil && *job.LogOutput {
 				return true
+			}
+			// Check all steps in job
+			for _, step := range job.Steps {
+				if step.LogOutput != nil && *step.LogOutput {
+					return true
+				}
 			}
 		}
 	}
 	return false // Default: no log file unless error occurs
+}
+
+// saveRenderedContentToVariable loads, renders, and saves file content to a variable
+func (e *Executor) saveRenderedContentToVariable(step *types.Step, vars types.Vars, entry struct{ Source, Destination, Template string }, varName string) error {
+	sourcePath := entry.Source
+
+	// Read file content
+	data, err := os.ReadFile(sourcePath)
+	if err != nil {
+		return fmt.Errorf("failed to read source file %s: %v", sourcePath, err)
+	}
+
+	// Check if it's text and templating is enabled
+	stepTemplateEnabled := (step.Template == "enabled")
+	var renderedContent string
+
+	if stepTemplateEnabled && isTextBytes(data) {
+		content := string(data)
+		renderedContent = e.interpolateString(content, vars)
+	} else {
+		renderedContent = string(data)
+	}
+
+	// Save to context variable
+	if e.pipeline != nil {
+		e.pipeline.ContextVariables[varName] = renderedContent
+		fmt.Printf("💾 Saved rendered content to variable: %s (%d bytes)\n", varName, len(renderedContent))
+	}
+
+	return nil
 }
 
 // ensureConditionalLogging creates log file if needed before function exit
@@ -873,11 +905,26 @@ func (e *Executor) runWriteFileStep(step *types.Step, job *types.Job, config map
 		return err
 	}
 
-	// Prepare rendering/staging: render files into temp when templating is enabled.
-	prepared, cleanup, renderWarnings, err := e.prepareRenderAndStage(step, rawEntries, vars)
-	if err != nil {
-		return err
+	var prepared []struct{ Source, Destination string }
+	var cleanup func()
+	var renderWarnings []map[string]string
+
+	// For single file: handle directly without temporary staging
+	if len(rawEntries) == 1 {
+		// Use original source directly - no staging needed
+		prepared = []struct{ Source, Destination string }{
+			{Source: rawEntries[0].Source, Destination: rawEntries[0].Destination},
+		}
+		cleanup = func() {} // No cleanup needed
+		renderWarnings = []map[string]string{}
+	} else {
+		// For multiple files: use staging as before
+		prepared, cleanup, renderWarnings, err = e.prepareRenderAndStage(step, rawEntries, vars)
+		if err != nil {
+			return err
+		}
 	}
+
 	defer func() {
 		if cleanup != nil {
 			cleanup()
@@ -904,6 +951,13 @@ func (e *Executor) runWriteFileStep(step *types.Step, job *types.Job, config map
 			if rerr != nil {
 				return fmt.Errorf("failed to read prepared file %s: %v", src, rerr)
 			}
+
+			// For single file: apply rendering if needed
+			if len(rawEntries) == 1 && step.Template == "enabled" && isTextBytes(data) {
+				content := string(data)
+				data = []byte(e.interpolateString(content, vars))
+			}
+
 			// Determine perm from step.Files if present
 			permStr := e.getPermForEntry(step, src, dst)
 			perm := os.FileMode(0755)
@@ -949,6 +1003,13 @@ func (e *Executor) runWriteFileStep(step *types.Step, job *types.Job, config map
 			if rerr != nil {
 				return fmt.Errorf("failed to read file %s: %v", src, rerr)
 			}
+
+			// For single file: apply rendering if needed
+			if len(rawEntries) == 1 && step.Template == "enabled" && isTextBytes(data) {
+				content := string(data)
+				data = []byte(e.interpolateString(content, vars))
+			}
+
 			// Determine perm
 			permStr := e.getPermForEntry(step, src, dst)
 			perm := os.FileMode(0755)
@@ -966,8 +1027,39 @@ func (e *Executor) runWriteFileStep(step *types.Step, job *types.Job, config map
 	}
 
 	duration := int(time.Since(start).Seconds())
-	// Save output summary if requested
-	if step.SaveOutput != "" && e.pipeline != nil {
+	
+	// For single file: always save rendered content to variable (auto-generate variable name if not specified)
+	if len(rawEntries) == 1 && e.pipeline != nil {
+		var varName string
+		if step.SaveOutput != "" {
+			varName = step.SaveOutput
+		} else {
+			// Auto-generate variable name from step name
+			varName = strings.ReplaceAll(step.Name, "-", "_")
+			varName = strings.ReplaceAll(varName, " ", "_")
+		}
+		
+		if err := e.saveRenderedContentToVariable(step, vars, rawEntries[0], varName); err != nil {
+			return fmt.Errorf("failed to save rendered content to variable: %v", err)
+		}
+		
+		// If SaveOutput is specified, also save via saveStepOutput for consistency
+		if step.SaveOutput != "" {
+			if content, exists := e.pipeline.ContextVariables[varName]; exists {
+				e.saveStepOutput(step.SaveOutput, content)
+			}
+		}
+		
+		// If auto-generated, also save with step name as key
+		if step.SaveOutput == "" {
+			if content, exists := e.pipeline.ContextVariables[varName]; exists {
+				e.pipeline.ContextVariables[step.Name] = content
+			}
+		}
+	}
+	
+	// Save output summary if requested (only for multiple files)
+	if step.SaveOutput != "" && e.pipeline != nil && len(rawEntries) > 1 {
 		outMap := map[string]interface{}{
 			"exit_code":        0,
 			"reason":           "success",
