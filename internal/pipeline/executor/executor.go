@@ -499,6 +499,9 @@ func (e *Executor) runStep(step *types.Step, job *types.Job, config map[string]i
 	case "script":
 		err := e.runScriptStep(step, job, config, vars)
 		return "", "", err
+	case "write_file":
+		err := e.runWriteFileStep(step, job, config, vars)
+		return "", "", err
 	default: // "command" or empty
 		return e.runCommandStep(step, job, config, vars)
 	}
@@ -1251,7 +1254,7 @@ func (e *Executor) buildFileTransferEntries(step *types.Step, vars types.Vars) (
 			if dst == "" {
 				return nil, fmt.Errorf("file entry %s missing destination and step.destination not set", f.Source)
 			}
-			if err := appendResolved(f.Source, dst, f.Template); err != nil {
+			if err := appendResolved(f.Source, dst, step.Template); err != nil {
 				return nil, err
 			}
 		}

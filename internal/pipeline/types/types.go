@@ -64,7 +64,6 @@ type Step struct {
 	// write_file specific
 	Overwrite    string `yaml:"overwrite,omitempty"` // "always"|"never"|"if-different" (default if-different)
 	SkipIfExists bool   `yaml:"skip_if_exists,omitempty"`
-	Mode         string `yaml:"mode,omitempty"`        // "local" or "remote" for write_file
 	ElseAction   string `yaml:"else_action,omitempty"` // action if no conditions match: "continue", "drop", "goto_step", "goto_job", "fail"
 	ElseStep     string `yaml:"else_step,omitempty"`   // target step name for else goto_step
 	ElseJob      string `yaml:"else_job,omitempty"`    // target job name for else goto_job
@@ -75,8 +74,7 @@ type Step struct {
 type FileEntry struct {
 	Source      string `yaml:"source"`
 	Destination string `yaml:"destination,omitempty"`
-	Template    string `yaml:"template,omitempty"` // optional per-file override
-	Perm        string `yaml:"perm,omitempty"`     // file mode e.g. "0644"
+	Perm        string `yaml:"perm,omitempty"` // file mode e.g. "0644"
 	Owner       string `yaml:"owner,omitempty"`
 	Group       string `yaml:"group,omitempty"`
 }

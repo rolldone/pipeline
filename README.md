@@ -419,7 +419,7 @@ jobs:
 
 ### Transfer per-file with `files` (recommended for many files)
 
-When you need to upload or download multiple files with different targets, use the `files` array within a `file_transfer` step. Each entry can have its own `source`, optional `destination`, and optional `template` as override. If `files` exists, it takes precedence over `source`/`sources`.
+When you need to upload or download multiple files with different targets, use the `files` array within a `file_transfer` step. Each entry can have its own `source`, optional `destination`. If `files` exists, it takes precedence over `source`/`sources`.
 
 Example:
 
@@ -440,7 +440,7 @@ Example:
 A new `write_file` step renders file contents (when templating is enabled) and then writes them to the target(s). It is intended for cases where you want the executor to perform rendering and then either write files locally or upload rendered bytes to remote hosts without creating persistent temp files on disk of the remote side.
 
 Key points:
-- Renders file contents using the same `{{var}}` interpolation logic when `template: "enabled"` is set at the step or per-file entry.
+- Renders file contents using the same `{{var}}` interpolation logic when `template: "enabled"` is set at the step level.
 - Uploads rendered content from memory (no temporary intermediate remote file required) using the in-memory uploader. This minimizes local disk churn and avoids leaving partially rendered files on the remote host.
 - Default file permission: when a per-file `perm` is not specified, the executor uses `0755` as the default mode for written/uploaded files.
 - Tolerant rendering: if the executor cannot stage a rendered file (for example, due to a local write error when preparing staged copies), it will fall back to using the original file bytes and record a `render_warnings` entry in the step's saved output (if `save_output` is set).
@@ -451,11 +451,10 @@ Example (render locally then upload rendered bytes to remote):
 ```yaml
 - name: "deploy-config"
   type: "write_file"
+  template: "enabled"
   files:
     - source: "config/app.conf"
       destination: "/etc/myapp/app.conf"
-      template: "enabled"
-  mode: "remote"        # or "local" to write on the runner
   save_output: "write_summary"
 ```
 
@@ -467,7 +466,6 @@ Notes:
 Behavior:
 - Per-file `destination` overrides step-level `destination`. If neither is set for an entry, the step will error.
 - Glob patterns in `source` are expanded locally for upload operations; each match result is transferred while preserving the relative path under the destination directory.
-- Per-file `template` overrides step-level `template` setting.
 - If multiple files are specified, `destination` must be a directory (ending with `/` or already a directory) — otherwise the step will error.
 - Backward compatibility: if `files` is not provided, `source` / `sources` will work as before.
 
