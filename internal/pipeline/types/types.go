@@ -33,6 +33,7 @@ type Job struct {
 // Step represents a step within a job
 type Step struct {
 	Name        string      `yaml:"name"`
+	Mode        string      `yaml:"mode,omitempty"`        // "local" or "remote" (default: inherit from job)
 	Type        string      `yaml:"type,omitempty"`        // "command" (default), "file_transfer", "script"
 	Commands    []string    `yaml:"commands,omitempty"`    // for command type
 	File        string      `yaml:"file,omitempty"`        // for script/file_transfer

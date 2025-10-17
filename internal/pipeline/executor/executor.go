@@ -374,6 +374,43 @@ func (e *Executor) resolveSSHConfigs(hosts []string, cfg *config.Config) ([]map[
 	return configs, nil
 }
 
+// saveStepOutput saves step output to context variables, parsing JSON to allow direct field access
+func (e *Executor) saveStepOutput(stepOutputKey, output string) {
+	if stepOutputKey == "" || e.pipeline == nil {
+		return
+	}
+
+	// Try to parse as JSON
+	var jsonData map[string]interface{}
+	if err := json.Unmarshal([]byte(output), &jsonData); err == nil {
+		// Successfully parsed as JSON, save individual fields
+		for key, value := range jsonData {
+			if strVal, ok := value.(string); ok {
+				e.pipeline.ContextVariables[key] = strVal
+			} else {
+				// For non-string values, convert to string
+				e.pipeline.ContextVariables[key] = fmt.Sprintf("%v", value)
+			}
+		}
+		// Also save the full JSON for reference
+		e.pipeline.ContextVariables[stepOutputKey] = output
+	} else {
+		// Not JSON, save as string
+		e.pipeline.ContextVariables[stepOutputKey] = output
+	}
+}
+
+// getEffectiveMode returns the effective execution mode for a step (step mode if set, otherwise job mode)
+func getEffectiveMode(jobMode, stepMode string) string {
+	if stepMode != "" {
+		return stepMode
+	}
+	if jobMode == "" {
+		return "remote"
+	}
+	return jobMode
+}
+
 // findJob finds a job by key (or name if key empty) in pipeline
 func (e *Executor) findJob(pipeline *types.Pipeline, keyOrName string) (*types.Job, error) {
 	for i, job := range pipeline.Jobs {
@@ -518,10 +555,7 @@ func (e *Executor) runStep(step *types.Step, job *types.Job, config map[string]i
 // set it appends --stats, parses the output and saves structured JSON into
 // e.pipeline.ContextVariables[step.SaveOutput].
 func (e *Executor) runRsyncStep(step *types.Step, job *types.Job, config map[string]interface{}, vars types.Vars) error {
-	jobMode := job.Mode
-	if jobMode == "" {
-		jobMode = "remote"
-	}
+	effectiveMode := getEffectiveMode(job.Mode, step.Mode)
 
 	// Build entries using existing helper for file_transfer-style sources
 	rawEntries, err := e.buildFileTransferEntries(step, vars)
@@ -542,7 +576,7 @@ func (e *Executor) runRsyncStep(step *types.Step, job *types.Job, config map[str
 		host, _ = config["Host"].(string)
 	}
 
-	argSlices, err := e.buildRsyncArgSlices(step, jobMode, host, entries)
+	argSlices, err := e.buildRsyncArgSlices(step, effectiveMode, host, entries)
 	if err != nil {
 		return err
 	}
@@ -727,7 +761,7 @@ func (e *Executor) runRsyncStep(step *types.Step, job *types.Job, config map[str
 				}
 				// render_warnings removed for rsync step (templating handled by write_file)
 				if b, jerr := json.Marshal(outMap); jerr == nil {
-					e.pipeline.ContextVariables[step.SaveOutput] = string(b)
+					e.saveStepOutput(step.SaveOutput, string(b))
 				}
 			}
 			e.flushErrorEvidenceAll()
@@ -752,7 +786,7 @@ func (e *Executor) runRsyncStep(step *types.Step, job *types.Job, config map[str
 			}
 			// render_warnings removed for rsync step (templating handled by write_file)
 			if b, jerr := json.Marshal(outMap); jerr == nil {
-				e.pipeline.ContextVariables[step.SaveOutput] = string(b)
+				e.saveStepOutput(step.SaveOutput, string(b))
 			}
 		}
 	}
@@ -781,15 +815,12 @@ func (e *Executor) runWriteFileStep(step *types.Step, job *types.Job, config map
 	}()
 
 	// Setup SSH client for remote uploads (or use local mode)
-	jobMode := job.Mode
-	if jobMode == "" {
-		jobMode = "remote"
-	}
+	effectiveMode := getEffectiveMode(job.Mode, step.Mode)
 
 	filesWritten := []string{}
 	start := time.Now()
 
-	if jobMode == "local" {
+	if effectiveMode == "local" {
 		// Local mode: copy staged/prepared files to destination
 		for _, p := range prepared {
 			// prepared.Source points to staged temp file if rendering occurred; otherwise original source
@@ -877,7 +908,7 @@ func (e *Executor) runWriteFileStep(step *types.Step, job *types.Job, config map
 			outMap["render_warnings"] = renderWarnings
 		}
 		if b, jerr := json.Marshal(outMap); jerr == nil {
-			e.pipeline.ContextVariables[step.SaveOutput] = string(b)
+			e.saveStepOutput(step.SaveOutput, string(b))
 		}
 	}
 
@@ -890,12 +921,9 @@ func (e *Executor) runCommandStep(step *types.Step, job *types.Job, config map[s
 	// Interpolate vars in commands
 	commands := e.interpolateVars(step.Commands, vars)
 
-	// Check if job is in local mode (default to "remote" for backward compatibility)
-	jobMode := job.Mode
-	if jobMode == "" {
-		jobMode = "remote"
-	}
-	if jobMode == "local" {
+	// Check if step is in local mode (default to job mode, then "remote" for backward compatibility)
+	effectiveMode := getEffectiveMode(job.Mode, step.Mode)
+	if effectiveMode == "local" {
 		return e.runCommandStepLocal(step, commands, vars)
 	}
 
@@ -972,6 +1000,11 @@ func (e *Executor) runCommandStep(step *types.Step, job *types.Job, config map[s
 
 		lastOutput = output // Save for potential output saving
 
+		// Save output to context variable if requested (BEFORE condition check)
+		if step.SaveOutput != "" && e.pipeline != nil {
+			e.saveStepOutput(step.SaveOutput, strings.TrimSpace(lastOutput))
+		}
+
 		// Check conditions on output
 		action, targetStep, err := e.checkConditions(step, output, vars)
 		if err != nil {
@@ -980,11 +1013,6 @@ func (e *Executor) runCommandStep(step *types.Step, job *types.Job, config map[s
 		if action != "" {
 			return action, targetStep, nil
 		}
-	}
-
-	// Save output to context variable if requested
-	if step.SaveOutput != "" && e.pipeline != nil {
-		e.pipeline.ContextVariables[step.SaveOutput] = strings.TrimSpace(lastOutput)
 	}
 
 	return "", "", nil
@@ -1059,11 +1087,8 @@ func (e *Executor) checkConditions(step *types.Step, output string, vars types.V
 // runFileTransferStep uploads/downloads files to/from remote host or copies locally
 func (e *Executor) runFileTransferStep(step *types.Step, job *types.Job, config map[string]interface{}, vars types.Vars) error {
 	// Handle local mode - no SSH, just local file operations
-	jobMode := job.Mode
-	if jobMode == "" {
-		jobMode = "remote"
-	}
-	if jobMode == "local" {
+	effectiveMode := getEffectiveMode(job.Mode, step.Mode)
+	if effectiveMode == "local" {
 		return e.runLocalFileTransfer(step, vars)
 	}
 
@@ -1943,15 +1968,13 @@ func (e *Executor) runCommandStepLocal(step *types.Step, commands []string, vars
 		}
 	}
 
-	// Save output to context variable if requested
-	if step.SaveOutput != "" && e.pipeline != nil {
-		e.pipeline.ContextVariables[step.SaveOutput] = strings.TrimSpace(lastOutput)
-	}
+        // Save output to context variable if requested
+        if step.SaveOutput != "" && e.pipeline != nil {
+                e.saveStepOutput(step.SaveOutput, strings.TrimSpace(lastOutput))
+        }
 
-	return "", "", nil
-}
-
-// runCommandLocal runs a command locally
+        return "", "", nil
+}// runCommandLocal runs a command locally
 func (e *Executor) runCommandLocal(cmd string) (string, error) {
 	// Use os/exec to run command locally
 	output, err := exec.Command("bash", "-c", cmd).CombinedOutput()

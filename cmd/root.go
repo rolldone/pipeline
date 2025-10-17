@@ -406,11 +406,8 @@ func showPipelineMenu() {
 			return
 		}
 
-		// Create menu items from executions
+		// Create menu items
 		var items []string
-		for _, exec := range cfg.DirectAccess.Executions {
-			items = append(items, fmt.Sprintf("▶️  %s (%s)", exec.Name, exec.Key))
-		}
 
 		// Add SSH commands
 		for _, sshCmd := range cfg.DirectAccess.SSHCommands {
@@ -434,41 +431,6 @@ func showPipelineMenu() {
 		if err != nil {
 			fmt.Printf("❌ Menu cancelled: %v\n", err)
 			return
-		}
-
-		// Handle execution selection
-		for _, exec := range cfg.DirectAccess.Executions {
-			if fmt.Sprintf("▶️  %s (%s)", exec.Name, exec.Key) == result {
-				fmt.Printf("🚀 Executing pipeline: %s\n", exec.Name)
-
-				// Load pipeline
-				pipelinePath := filepath.Join(cfg.DirectAccess.PipelineDir, exec.Pipeline)
-				pipeline, err := parser.ParsePipeline(pipelinePath)
-				if err != nil {
-					fmt.Printf("❌ Failed to parse pipeline: %v\n", err)
-					continue
-				}
-
-				// Load vars (simplified version)
-				vars := make(types.Vars)
-				if exec.Variables != nil {
-					for k, v := range exec.Variables {
-						vars[k] = v
-					}
-				}
-
-				// Execute
-				executor := executor.NewExecutor()
-				if err := executor.Execute(pipeline, &exec, vars, exec.Hosts, cfg); err != nil {
-					fmt.Printf("❌ Execution failed: %v\n", err)
-				} else {
-					fmt.Println("✅ Pipeline executed successfully")
-				}
-
-				fmt.Println("\nPress Enter to continue...")
-				fmt.Scanln()
-				break
-			}
 		}
 
 		// Handle SSH command execution
@@ -533,12 +495,7 @@ func showPipelineMenu() {
 			fmt.Scanln()
 
 		case "📋 List Pipelines":
-			fmt.Println("Available Executions:")
-			for _, exec := range cfg.DirectAccess.Executions {
-				fmt.Printf("- %s (%s): %s\n", exec.Name, exec.Key, exec.Pipeline)
-			}
-			fmt.Println("\nPress Enter to continue...")
-			fmt.Scanln()
+			showExecutionSelectionMenu(cfg)
 
 		case "ℹ️  Show Info":
 			runPipelineInfo()
@@ -875,4 +832,164 @@ func generateSSHTempConfig(cfg *config.Config, hostName string) error {
 
 	fmt.Printf("✅ Generated SSH temp config with %d host entries: %s\n", len(renderedCfg.DirectAccess.SSHConfigs), configPath)
 	return nil
+}
+
+// showExecutionSelectionMenu displays a menu to select and run an execution
+func showExecutionSelectionMenu(cfg *config.Config) {
+	if len(cfg.DirectAccess.Executions) == 0 {
+		fmt.Println("❌ No executions available")
+		fmt.Println("\nPress Enter to continue...")
+		fmt.Scanln()
+		return
+	}
+
+	// Create menu items from executions
+	var items []string
+	for _, exec := range cfg.DirectAccess.Executions {
+		items = append(items, fmt.Sprintf("▶️  %s (%s)", exec.Name, exec.Key))
+	}
+	items = append(items, "⬅️  Back to Main Menu")
+
+	prompt := promptui.Select{
+		Label: "Select an execution to run",
+		Items: items,
+		Size:  10,
+	}
+
+	_, result, err := prompt.Run()
+	if err != nil {
+		fmt.Printf("❌ Menu cancelled: %v\n", err)
+		return
+	}
+
+	if result == "⬅️  Back to Main Menu" {
+		return
+	}
+
+	// Find and execute the selected execution
+	for _, exec := range cfg.DirectAccess.Executions {
+		if fmt.Sprintf("▶️  %s (%s)", exec.Name, exec.Key) == result {
+			fmt.Printf("🚀 Executing pipeline: %s\n", exec.Name)
+
+			// Validate pipeline file exists
+			pipelinePath := filepath.Join(cfg.DirectAccess.PipelineDir, exec.Pipeline)
+			if _, err := os.Stat(pipelinePath); os.IsNotExist(err) {
+				fmt.Printf("❌ Pipeline file '%s' not found\n", exec.Pipeline)
+				fmt.Println("\nPress Enter to continue...")
+				fmt.Scanln()
+				return
+			}
+
+			// Validate hosts exist in SSH configs
+			if len(exec.Hosts) > 0 {
+				hostMap := make(map[string]bool)
+				for _, sshConfig := range cfg.DirectAccess.SSHConfigs {
+					if host, ok := sshConfig["Host"].(string); ok {
+						hostMap[host] = true
+					}
+				}
+				for _, host := range exec.Hosts {
+					if !hostMap[host] {
+						fmt.Printf("❌ Host '%s' not found in SSH configs\n", host)
+						fmt.Println("\nPress Enter to continue...")
+						fmt.Scanln()
+						return
+					}
+				}
+			}
+
+			// Validate var key exists in vars.yaml if specified
+			if exec.Var != "" {
+				varsPath := parser.ResolveVarsPath(cfg.DirectAccess.PipelineDir)
+				if _, err := os.Stat(varsPath); err == nil {
+					// vars.yaml exists, check if key exists
+					data, err := os.ReadFile(varsPath)
+					if err == nil {
+						var allVars map[string]types.Vars
+						if err := yaml.Unmarshal(data, &allVars); err == nil {
+							if _, exists := allVars[exec.Var]; !exists {
+								fmt.Printf("❌ Vars key '%s' not found in vars.yaml\n", exec.Var)
+								fmt.Println("\nPress Enter to continue...")
+								fmt.Scanln()
+								return
+							}
+						}
+					}
+				} else {
+					fmt.Printf("❌ Vars file 'vars.yaml' not found\n")
+					fmt.Println("\nPress Enter to continue...")
+					fmt.Scanln()
+					return
+				}
+			}
+
+			// Load pipeline
+			pipeline, err := parser.ParsePipeline(pipelinePath)
+			if err != nil {
+				fmt.Printf("❌ Failed to parse pipeline: %v\n", err)
+				fmt.Println("\nPress Enter to continue...")
+				fmt.Scanln()
+				return
+			}
+
+			// Validate that all jobs in execution exist in pipeline
+			if len(exec.Jobs) > 0 {
+				jobMap := make(map[string]bool)
+				for _, job := range pipeline.Jobs {
+					key := job.Key
+					if key == "" {
+						key = job.Name // fallback to name if key is empty
+					}
+					jobMap[key] = true
+				}
+				for _, jobKey := range exec.Jobs {
+					if !jobMap[jobKey] {
+						fmt.Printf("❌ Job '%s' not found in pipeline '%s'\n", jobKey, exec.Pipeline)
+						fmt.Println("\nPress Enter to continue...")
+						fmt.Scanln()
+						return
+					}
+				}
+			}
+
+			// Load vars with priority system:
+			// 1. Start with empty vars
+			vars := make(types.Vars)
+
+			// 2. Load from vars.yaml if execution.Var is specified (lowest priority)
+			if exec.Var != "" {
+				varsPath := parser.ResolveVarsPath(cfg.DirectAccess.PipelineDir)
+				fileVars, err := parser.ParseVarsSafe(varsPath, exec.Var)
+				if err != nil {
+					fmt.Printf("❌ Failed to parse vars: %v\n", err)
+					fmt.Println("\nPress Enter to continue...")
+					fmt.Scanln()
+					return
+				}
+				// Merge fileVars into vars
+				for k, v := range fileVars {
+					vars[k] = v
+				}
+			}
+
+			// 3. Merge execution.Variables (higher priority than vars.yaml)
+			if exec.Variables != nil {
+				for k, v := range exec.Variables {
+					vars[k] = v
+				}
+			}
+
+			// Execute
+			executor := executor.NewExecutor()
+			if err := executor.Execute(pipeline, &exec, vars, exec.Hosts, cfg); err != nil {
+				fmt.Printf("❌ Execution failed: %v\n", err)
+			} else {
+				fmt.Println("✅ Pipeline executed successfully")
+			}
+
+			fmt.Println("\nPress Enter to continue...")
+			fmt.Scanln()
+			return
+		}
+	}
 }

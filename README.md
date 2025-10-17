@@ -282,6 +282,31 @@ jobs:
         commands: ["systemctl restart nginx", "systemctl restart app"]
 ```
 
+### Step Mode Override
+
+Individual steps can override the job's execution mode by specifying a `mode` field. This is useful for mixed local/remote operations within the same job.
+
+```yaml
+jobs:
+  - name: "deploy-with-local-setup"
+    mode: "remote"  # Default for all steps
+    steps:
+      - name: "create-local-dir"
+        type: "command"
+        mode: "local"        # Override: run locally
+        commands: ["mkdir -p ./temp_files"]
+      - name: "generate-config"
+        type: "command"
+        mode: "local"        # Override: run locally
+        commands: ["cp config.template ./temp_files/config.yml"]
+      - name: "upload-files"
+        type: "file_transfer"
+        source: "./temp_files/"
+        destination: "/var/www/config/"  # Uses job mode (remote)
+```
+
+When `mode` is not specified on a step, it inherits the job's mode (defaulting to `"remote"` if the job has no mode).
+
 ## Execution Configuration
 
 Executions define how and when to run pipeline jobs. They provide validation and selective job execution.
@@ -381,6 +406,7 @@ steps:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `name` | string | - | Unique step identifier |
+| `mode` | string | - | Execution mode override: `"local"` or `"remote"` (default: inherit from job) |
 | `type` | string | - | Step type: `command`, `file_transfer`, `script` |
 | `commands` | []string | - | Commands to execute (for `command` type) |
 | `file` | string | - | Script file path (for `script` type) |
@@ -464,6 +490,24 @@ steps:
     type: "command"
     commands: ["docker build -t myapp:{{commit_sha}} ."]
 ```
+
+**Structured Output Support**: If the command output is valid JSON, individual fields are automatically extracted and made available as direct variables, while the full JSON remains accessible via the save_output key:
+
+```yaml
+steps:
+  - name: "get-metadata"
+    type: "command"
+    commands: ["curl -s https://api.example.com/metadata"]
+    save_output: "metadata"
+
+  - name: "use-fields"
+    type: "command"
+    commands: ["echo 'Version: {{version}} from {{metadata.source}}'"]
+```
+
+In this example, if the API returns `{"version": "1.2.3", "source": "production"}`:
+- `{{version}}` and `{{source}}` are available directly from the parsed fields
+- `{{metadata}}` contains the full JSON string: `{"version": "1.2.3", "source": "production"}`
 
 ### File Template Rendering (changed)
 
@@ -917,6 +961,11 @@ Variables are merged with the following priority:
 4. **Global pipeline.variables** - **Low**
 5. **Runtime variables** (save_output) - **Lowest**
 
+**Runtime Variables**: Variables created via `save_output` can contain:
+- Simple strings (e.g., command output, file content)
+- Structured data (JSON objects/arrays) where individual fields become accessible as direct variables
+- The full JSON string is also saved under the `save_output` key for reference
+
 ### Variable Interpolation
 
 Use format `{{VAR_NAME}}` in commands:
@@ -933,6 +982,26 @@ steps:
     commands: ["echo 'Deploying image {{image_id}}'"]
 ```
 
+**Structured Data Access**: When `save_output` captures JSON data, individual fields are accessible as direct variables, and the full JSON remains available:
+
+```yaml
+steps:
+  - name: "get-info"
+    type: "command"
+    commands: ["echo '{\"folder\": \"myapp\", \"version\": \"1.0\"}'"]
+    save_output: "app_info"
+
+  - name: "use-fields"
+    type: "command"
+    commands: ["mkdir -p {{folder}} && echo 'Created {{folder}} v{{version}}'"]
+
+  - name: "show-full-json"
+    type: "command"
+    commands: ["echo 'Full data: {{app_info}}'"]
+```
+
+In this example, `{{folder}}` and `{{version}}` are available directly from the structured output, while `{{app_info}}` contains the complete JSON string.
+
 #### Fields Supporting Variable Interpolation
 
 Variable interpolation with format `{{VAR_NAME}}` is supported in:
@@ -944,6 +1013,7 @@ Variable interpolation with format `{{VAR_NAME}}` is supported in:
 | `source` | string | Source path (for `file_transfer` type) |
 | `destination` | string | Destination path (for `file_transfer` type) |
 | `working_dir` | string | Working directory for step |
+| `save_output` | string | Variable name for saving output (supports interpolation) |
 | `conditions[].pattern` | string | Regex pattern for conditional matching |
 | `expect[].response` | string | Response for interactive prompts |
 
