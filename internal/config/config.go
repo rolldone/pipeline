@@ -19,6 +19,88 @@ import (
 
 var printer = util.Default
 
+// fixSSHKeyPermissions sets SSH private key file and directory permissions
+// SSH requires private keys to have 0600 permissions (owner read/write only)
+// and directories should be accessible (0700 for security by default, but configurable)
+func fixSSHKeyPermissions(keyPath string, dirPerm os.FileMode) error {
+	if keyPath == "" {
+		return nil
+	}
+
+	printer.Printf("🔍 Processing SSH key path: %s\n", keyPath)
+
+	// Expand ~ to home directory if present
+	if strings.HasPrefix(keyPath, "~") {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("failed to get home directory: %v", err)
+		}
+		keyPath = filepath.Join(homeDir, keyPath[1:])
+		printer.Printf("🏠 Expanded ~ to home: %s\n", keyPath)
+	}
+
+	// Convert to absolute path
+	absKeyPath, err := filepath.Abs(keyPath)
+	if err != nil {
+		return fmt.Errorf("failed to get absolute path for %s: %v", keyPath, err)
+	}
+	keyPath = absKeyPath
+	printer.Printf("📁 Absolute path: %s\n", keyPath)
+
+	// Check if file exists
+	info, err := os.Stat(keyPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			printer.Printf("❌ SSH key file does not exist: %s\n", keyPath)
+			return fmt.Errorf("SSH key file does not exist: %s", keyPath)
+		}
+		printer.Printf("❌ Cannot access SSH key file: %v\n", err)
+		return fmt.Errorf("cannot access SSH key file: %v", err)
+	}
+
+	currentPerm := info.Mode().Perm()
+	requiredPerm := os.FileMode(0600)
+
+	printer.Printf("🔒 Current permissions: %o, required: %o\n", currentPerm, requiredPerm)
+
+	// Set permissions to 0600
+	err = os.Chmod(keyPath, requiredPerm)
+	if err != nil {
+		return fmt.Errorf("failed to set SSH key permissions for %s: %v", keyPath, err)
+	}
+
+	// Verify the permission change
+	info, err = os.Stat(keyPath)
+	if err != nil {
+		printer.Printf("⚠️  Warning: cannot verify permission change: %v\n", err)
+	} else {
+		newPerm := info.Mode().Perm()
+		printer.Printf("✅ SSH key permissions set: %s (%o → %o)\n", keyPath, currentPerm, newPerm)
+	}
+
+	// Also fix parent directory permissions to the specified permission
+	parentDir := filepath.Dir(keyPath)
+	dirInfo, err := os.Stat(parentDir)
+	if err == nil {
+		currentDirPerm := dirInfo.Mode().Perm()
+		if currentDirPerm != dirPerm {
+			printer.Printf("📂 Fixing directory permissions: %s (%o → %o)\n", parentDir, currentDirPerm, dirPerm)
+			err = os.Chmod(parentDir, dirPerm)
+			if err != nil {
+				printer.Printf("⚠️  Warning: failed to set directory permissions for %s: %v\n", parentDir, err)
+			} else {
+				printer.Printf("✅ Directory permissions set: %s\n", parentDir)
+			}
+		} else {
+			printer.Printf("✅ Directory permissions already correct: %s\n", parentDir)
+		}
+	} else {
+		printer.Printf("⚠️  Warning: cannot access parent directory %s: %v\n", parentDir, err)
+	}
+
+	return nil
+}
+
 const ConfigFileName = "make-sync.yaml"
 
 type Config struct {
@@ -367,6 +449,15 @@ func RenderTemplateVariablesInMemory(cfg *Config) (*Config, error) {
 			(*sshConfig)["IdentityFile"] = renderer.RenderComplexTemplates(identityFile)
 			printer.Printf("🔧 Rendered SSH config[%d].IdentityFile: %s → %s\n", i, oldValue, (*sshConfig)["IdentityFile"])
 			renderCount++
+
+			// Fix SSH key permissions after rendering
+			finalIdentityFile := (*sshConfig)["IdentityFile"].(string)
+			if strings.TrimSpace(finalIdentityFile) != "" && !strings.HasPrefix(finalIdentityFile, "=") {
+				printer.Printf("🔑 Fixing permissions for SSH config[%d] IdentityFile: %s\n", i, finalIdentityFile)
+				if err := fixSSHKeyPermissions(finalIdentityFile, 0700); err != nil {
+					printer.Printf("⚠️  Failed to fix SSH key permissions for %s: %v\n", finalIdentityFile, err)
+				}
+			}
 		}
 		if remoteCommand, ok := (*sshConfig)["RemoteCommand"].(string); ok && strings.Contains(remoteCommand, "=") {
 			oldValue := remoteCommand
@@ -413,6 +504,16 @@ func RenderTemplateVariablesInMemory(cfg *Config) (*Config, error) {
 		// so template references are not relevant for them
 		if len(renderedCfg.DirectAccess.Executions) == 0 {
 			printer.Println("ℹ️  No template references found in configuration")
+		}
+	}
+
+	// Fix SSH key permissions for all IdentityFile entries in SSH configs after rendering
+	for i, sshConfig := range renderedCfg.DirectAccess.SSHConfigs {
+		if identityFile, ok := sshConfig["IdentityFile"].(string); ok && strings.TrimSpace(identityFile) != "" && !strings.HasPrefix(identityFile, "=") {
+			printer.Printf("🔑 Fixing permissions for SSH config[%d] IdentityFile: %s\n", i, identityFile)
+			if err := fixSSHKeyPermissions(identityFile, 0700); err != nil {
+				printer.Printf("⚠️  Failed to fix SSH key permissions for %s: %v\n", identityFile, err)
+			}
 		}
 	}
 
