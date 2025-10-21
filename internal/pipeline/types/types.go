@@ -13,16 +13,18 @@ type Execution struct {
 
 // Pipeline represents a pipeline configuration
 type Pipeline struct {
-	Name             string            `yaml:"name"`
-	Jobs             []Job             `yaml:"jobs"`
-	StrictVariables  bool              `yaml:"strict_variables,omitempty"` // error on undefined variables if true
-	ContextVariables map[string]string `yaml:"-"`                          // runtime context variables (not serialized)
-	LogOutput        *bool             `yaml:"log_output,omitempty"`       // optional: enable logging for entire pipeline
+	Name             string                 `yaml:"name"`
+	Description      string                 `yaml:"description,omitempty"`
+	Variables        map[string]interface{} `yaml:"variables,omitempty"` // pipeline-level default variables (lowest priority)
+	Jobs             []Job                  `yaml:"jobs"`
+	StrictVariables  bool                   `yaml:"strict_variables,omitempty"` // error on undefined variables if true
+	ContextVariables map[string]string      `yaml:"-"`                          // runtime context variables (not serialized)
+	LogOutput        *bool                  `yaml:"log_output,omitempty"`       // optional: enable logging for entire pipeline
 }
 
 // Job represents a job within a pipeline
 type Job struct {
-	Key       string   `yaml:"key,omitempty"`    // unique key for referencing in executions
+	Key       string   `yaml:"key,omitempty"` // unique key for referencing in executions
 	Name      string   `yaml:"name"`
 	DependsOn []string `yaml:"depends_on,omitempty"`
 	Mode      string   `yaml:"mode,omitempty"` // "local" or "remote" (default: "remote")
@@ -35,7 +37,8 @@ type Step struct {
 	Name        string      `yaml:"name"`
 	Mode        string      `yaml:"mode,omitempty"`        // "local" or "remote" (default: inherit from job)
 	Type        string      `yaml:"type,omitempty"`        // "command" (default), "file_transfer", "script"
-	Commands    []string    `yaml:"commands,omitempty"`    // for command type
+	Commands    []string    `yaml:"commands,omitempty"`    // for command type (higher priority)
+	Command     string      `yaml:"command,omitempty"`     // for command type (lower priority)
 	File        string      `yaml:"file,omitempty"`        // for script/file_transfer
 	Source      string      `yaml:"source,omitempty"`      // for file_transfer (deprecated when using `files`)
 	Sources     []string    `yaml:"sources,omitempty"`     // optional: multiple sources for file_transfer

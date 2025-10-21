@@ -6,7 +6,8 @@ pipeline:
   description: "Docker-based CI/CD pipeline for {{PIPELINE_NAME}}"
   strict_variables: false
 
-  # Global variables (can be overridden per execution)
+  # Pipeline-level default variables (lowest priority)
+  # These can be overridden by execution-level variables or vars.yaml
   variables:
     DOCKER_REGISTRY: "docker.io"
     DOCKER_REPO: "your-org/{{PIPELINE_NAME}}"
@@ -27,8 +28,8 @@ pipeline:
 
         - name: "check-files"
           type: "command"
-          commands: ["ls -la {{BUILD_CONTEXT}}"]
-          description: "Check build context exists"
+          command: "ls -la {{BUILD_CONTEXT}}"
+          description: "Check build context exists (using command singular)"
 
         - name: "validate-dockerfile"
           type: "command"
@@ -118,17 +119,20 @@ pipeline:
           description: "Notify team about rollback"
 
 # Execution configurations
-executions:
-  - name: "Development Build"
-    key: "dev"
-    pipeline: "{{PIPELINE_NAME}}.yaml"
-    hosts: ["localhost"]
-    variables:
-      DOCKER_TAG: "dev-$(date +%Y%m%d-%H%M%S)"
-
-  - name: "Production Deploy"
-    key: "prod"
-    pipeline: "{{PIPELINE_NAME}}.yaml"
-    hosts: ["prod-server-01", "prod-server-02"]
-    variables:
-      DOCKER_TAG: "$(git rev-parse --short HEAD)"
+# NOTE: Executions should be defined in your main pipeline config file (pipeline.yaml)
+# NOT in this pipeline job file. This is just an example of how to structure executions.
+#
+# Example execution in pipeline.yaml:
+# executions:
+#   - name: "Development Build"
+#     key: "dev"
+#     pipeline: "my-pipeline.yaml"
+#     variables:
+#       DOCKER_TAG: "dev-$(date +%Y%m%d-%H%M%S)"
+#
+#   - name: "Production Deploy"
+#     key: "prod"
+#     pipeline: "my-pipeline.yaml"
+#     hosts: ["prod-server-01", "prod-server-02"]
+#     variables:
+#       DOCKER_TAG: "$(git rev-parse --short HEAD)"

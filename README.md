@@ -408,7 +408,8 @@ steps:
 | `name` | string | - | Unique step identifier |
 | `mode` | string | - | Execution mode override: `"local"` or `"remote"` (default: inherit from job) |
 | `type` | string | - | Step type: `command`, `file_transfer`, `script` |
-| `commands` | []string | - | Commands to execute (for `command` type) |
+| `commands` | []string | - | Commands to execute (for `command` type) - takes priority over `command` |
+| `command` | string | - | Single command to execute (for `command` type) - for backward compatibility |
 | `file` | string | - | Script file path (for `script` type) |
 | `source` | string | - | Source path (for `file_transfer` type) |
 | `destination` | string | - | Destination path (for `file_transfer` type) |
@@ -422,6 +423,39 @@ steps:
 | `save_output` | string | - | Save command output to context variable |
 | `conditions` | []Condition | - | Conditional execution based on output |
 | `expect` | []Expect | - | Interactive prompt responses |
+
+### Command Format Support
+
+Pipeline supports two command formats for backward compatibility:
+
+#### Commands Array (Recommended)
+```yaml
+steps:
+  - name: "build-app"
+    type: "command"
+    commands: ["npm install", "npm run build"]
+```
+
+#### Single Command (Legacy)
+```yaml
+steps:
+  - name: "build-app"
+    type: "command"
+    command: "npm install && npm run build"
+```
+
+#### Priority System
+When both formats are present, `commands` array takes priority over `command` string:
+
+```yaml
+steps:
+  - name: "build-app"
+    type: "command"
+    commands: ["npm install", "npm run build"]  # This will be used
+    command: "echo 'ignored'"                    # This is ignored
+```
+
+This ensures backward compatibility while encouraging the use of the more flexible `commands` array format.
 
 ### Silent Mode
 `silent: true` suppresses real-time output display per line, but output is still saved and can be displayed in subsequent steps:

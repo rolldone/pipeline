@@ -29,5 +29,6 @@ direct_access:
       key: "example"
       pipeline: "example-pipeline.yaml"
       hosts: []
+      var: "var"
       variables: {}
   

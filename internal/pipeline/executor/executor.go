@@ -79,7 +79,7 @@ func (e *Executor) writeLog(message string) {
 	if e.logFile == nil && (e.hasError || e.shouldCreateLogFile()) {
 		e.createLogFile()
 	}
-	
+
 	if e.logFile != nil {
 		// Strip ANSI escape codes for clean log file
 		cleanMessage := stripAnsiCodes(message)
@@ -119,14 +119,14 @@ func (e *Executor) flushErrorEvidenceAll() {
 	if len(lines) == 0 {
 		return
 	}
-	
+
 	// Ensure log file exists when flushing error evidence (force create on error)
 	if e.logFile == nil {
-		e.hasError = true // Mark as error occurred
+		e.hasError = true     // Mark as error occurred
 		e.forceLogging = true // Force logging
 		e.createLogFile()
 	}
-	
+
 	header := "=== ERROR EVIDENCE (buffer up to 300KB) ==="
 	e.writeLog(header)
 	for _, l := range lines {
@@ -389,6 +389,11 @@ func (e *Executor) Execute(pipeline *types.Pipeline, execution *types.Execution,
 		sortedJobs = append(sortedJobs, level...)
 	}
 
+	// If no jobs specified in execution, this is an error
+	if len(sortedJobs) == 0 {
+		return fmt.Errorf("no jobs specified in execution '%s' - please specify jobs to run in the execution configuration", execution.Name)
+	}
+
 	currentJobIndex := 0
 
 	for currentJobIndex < len(sortedJobs) {
@@ -556,8 +561,9 @@ func (e *Executor) runJobFromStep(job *types.Job, jobName string, startStepIdx i
 		action := ""
 		targetStep := ""
 
-		for _, config := range configs {
-			stepAction, stepTarget, err := e.runStep(step, job, config, vars)
+		// For local jobs with no hosts, run steps once with empty config
+		if len(configs) == 0 && getEffectiveMode(job.Mode, step.Mode) == "local" {
+			stepAction, stepTarget, err := e.runStep(step, job, nil, vars)
 			if err != nil {
 				return err
 			}
@@ -566,16 +572,35 @@ func (e *Executor) runJobFromStep(job *types.Job, jobName string, startStepIdx i
 			if stepAction == "goto_step" && stepTarget != "" {
 				action = stepAction
 				targetStep = stepTarget
-				break // Break host loop to restart with new step
 			} else if stepAction == "goto_job" && stepTarget != "" {
 				action = stepAction
 				targetStep = stepTarget
-				break // Break host loop to switch job
 			} else if stepAction == "drop" {
 				action = stepAction
-				break // Break host loop to stop job execution
 			}
-			// For "continue" or no action, continue to next host
+		} else {
+			// Normal execution for remote jobs or jobs with hosts
+			for _, config := range configs {
+				stepAction, stepTarget, err := e.runStep(step, job, config, vars)
+				if err != nil {
+					return err
+				}
+
+				// Handle conditional actions
+				if stepAction == "goto_step" && stepTarget != "" {
+					action = stepAction
+					targetStep = stepTarget
+					break // Break host loop to restart with new step
+				} else if stepAction == "goto_job" && stepTarget != "" {
+					action = stepAction
+					targetStep = stepTarget
+					break // Break host loop to switch job
+				} else if stepAction == "drop" {
+					action = stepAction
+					break // Break host loop to stop job execution
+				}
+				// For "continue" or no action, continue to next host
+			}
 		}
 
 		// Handle goto_step and goto_job after processing all hosts for this step
@@ -1027,7 +1052,7 @@ func (e *Executor) runWriteFileStep(step *types.Step, job *types.Job, config map
 	}
 
 	duration := int(time.Since(start).Seconds())
-	
+
 	// For single file: always save rendered content to variable (auto-generate variable name if not specified)
 	if len(rawEntries) == 1 && e.pipeline != nil {
 		var varName string
@@ -1038,18 +1063,18 @@ func (e *Executor) runWriteFileStep(step *types.Step, job *types.Job, config map
 			varName = strings.ReplaceAll(step.Name, "-", "_")
 			varName = strings.ReplaceAll(varName, " ", "_")
 		}
-		
+
 		if err := e.saveRenderedContentToVariable(step, vars, rawEntries[0], varName); err != nil {
 			return fmt.Errorf("failed to save rendered content to variable: %v", err)
 		}
-		
+
 		// If SaveOutput is specified, also save via saveStepOutput for consistency
 		if step.SaveOutput != "" {
 			if content, exists := e.pipeline.ContextVariables[varName]; exists {
 				e.saveStepOutput(step.SaveOutput, content)
 			}
 		}
-		
+
 		// If auto-generated, also save with step name as key
 		if step.SaveOutput == "" {
 			if content, exists := e.pipeline.ContextVariables[varName]; exists {
@@ -1057,7 +1082,7 @@ func (e *Executor) runWriteFileStep(step *types.Step, job *types.Job, config map
 			}
 		}
 	}
-	
+
 	// Save output summary if requested (only for multiple files)
 	if step.SaveOutput != "" && e.pipeline != nil && len(rawEntries) > 1 {
 		outMap := map[string]interface{}{
@@ -1080,8 +1105,8 @@ func (e *Executor) runWriteFileStep(step *types.Step, job *types.Job, config map
 // runCommandStep runs a command step on a host with conditional and interactive support
 func (e *Executor) runCommandStep(step *types.Step, job *types.Job, config map[string]interface{}, vars types.Vars) (string, string, error) {
 	fmt.Printf("📋 Executing step: %s\n", step.Name)
-	// Interpolate vars in commands
-	commands := e.interpolateVars(step.Commands, vars)
+	// Get commands with priority: commands > command
+	commands := e.getStepCommands(step, vars)
 
 	// Check if step is in local mode (default to job mode, then "remote" for backward compatibility)
 	effectiveMode := getEffectiveMode(job.Mode, step.Mode)
@@ -1645,6 +1670,18 @@ func (e *Executor) interpolateVars(commands []string, vars types.Vars) []string 
 	return result
 }
 
+// getStepCommands returns commands with priority: commands array > command string
+func (e *Executor) getStepCommands(step *types.Step, vars types.Vars) []string {
+	// Priority: commands array takes precedence over command string
+	if len(step.Commands) > 0 {
+		return e.interpolateVars(step.Commands, vars)
+	}
+	if step.Command != "" {
+		return []string{e.interpolateString(step.Command, vars)}
+	}
+	return []string{}
+}
+
 // runCommandInteractive runs a command with interactive prompt support and timeout
 func (e *Executor) runCommandInteractive(client *sshclient.SSHClient, cmd string, expects []types.Expect, vars types.Vars, timeoutSeconds int, idleTimeoutSeconds int, silent bool, step *types.Step, job *types.Job) (string, error) {
 	if len(expects) == 0 {
@@ -1968,16 +2005,25 @@ func (e *Executor) runCommandStepLocal(step *types.Step, commands []string, vars
 	// Determine working directory
 	workingDir := e.interpolateString(step.WorkingDir, vars)
 	if workingDir == "" {
-		// Use working_dir from vars if step doesn't specify one
-		if wd, ok := vars["working_dir"].(string); ok {
-			workingDir = wd
+		// For local mode, use current working directory as default
+		if cwd, err := os.Getwd(); err == nil {
+			workingDir = cwd
 		}
+		// If os.Getwd() fails, workingDir remains empty (run in current shell directory)
 	}
 
 	// debug prints removed
 	var lastOutput string
 	// For local mode, implement idle and total timeout behavior similar to remote execution
 	for _, cmd := range commands {
+		// Auto-create working directory if specified and doesn't exist
+		if workingDir != "" {
+			if err := os.MkdirAll(workingDir, 0755); err != nil {
+				e.flushErrorEvidenceAll()
+				return "", "", fmt.Errorf("failed to create working directory %s: %v", workingDir, err)
+			}
+		}
+
 		// Prepend cd command if working directory is specified
 		fullCmd := cmd
 		if workingDir != "" {
@@ -2130,13 +2176,13 @@ func (e *Executor) runCommandStepLocal(step *types.Step, commands []string, vars
 		}
 	}
 
-        // Save output to context variable if requested
-        if step.SaveOutput != "" && e.pipeline != nil {
-                e.saveStepOutput(step.SaveOutput, strings.TrimSpace(lastOutput))
-        }
+	// Save output to context variable if requested
+	if step.SaveOutput != "" && e.pipeline != nil {
+		e.saveStepOutput(step.SaveOutput, strings.TrimSpace(lastOutput))
+	}
 
-        return "", "", nil
-}// runCommandLocal runs a command locally
+	return "", "", nil
+} // runCommandLocal runs a command locally
 func (e *Executor) runCommandLocal(cmd string) (string, error) {
 	// Use os/exec to run command locally
 	output, err := exec.Command("bash", "-c", cmd).CombinedOutput()

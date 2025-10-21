@@ -157,10 +157,22 @@ func newPipelineRunCmd() *cobra.Command {
 			}
 
 			// Load vars with priority system:
-			// 1. Start with empty vars
+			// 1. Start with empty vars and add built-in variables
 			vars := make(types.Vars)
 
-			// 2. Load from vars.yaml if execution.Var is specified (lowest priority)
+			// Add built-in PROJECT_DIR variable (current working directory)
+			if cwd, err := os.Getwd(); err == nil {
+				vars["PROJECT_DIR"] = cwd
+			}
+
+			// 2. Load pipeline.Variables (lowest priority - defaults)
+			if pipeline.Variables != nil {
+				for k, v := range pipeline.Variables {
+					vars[k] = v
+				}
+			}
+
+			// 3. Load from vars.yaml if execution.Var is specified
 			if execution.Var != "" {
 				varsPath := parser.ResolveVarsPath(cfg.DirectAccess.PipelineDir)
 				fileVars, err := parser.ParseVarsSafe(varsPath, execution.Var)
@@ -168,20 +180,20 @@ func newPipelineRunCmd() *cobra.Command {
 					fmt.Printf("❌ Failed to parse vars: %v\n", err)
 					os.Exit(1)
 				}
-				// Merge fileVars into vars
+				// Merge fileVars into vars (overrides pipeline defaults)
 				for k, v := range fileVars {
 					vars[k] = v
 				}
 			}
 
-			// 3. Merge execution.Variables (higher priority than vars.yaml)
+			// 4. Merge execution.Variables (higher priority than vars.yaml)
 			if execution.Variables != nil {
 				for k, v := range execution.Variables {
 					vars[k] = v
 				}
 			}
 
-			// 4. Apply CLI overrides (highest priority)
+			// 5. Apply CLI overrides (highest priority)
 			for k, v := range varOverrides {
 				vars[k] = v
 			}
@@ -1006,10 +1018,22 @@ func showExecutionSelectionMenu(cfg *config.Config) {
 			}
 
 			// Load vars with priority system:
-			// 1. Start with empty vars
+			// 1. Start with empty vars and add built-in variables
 			vars := make(types.Vars)
 
-			// 2. Load from vars.yaml if execution.Var is specified (lowest priority)
+			// Add built-in PROJECT_DIR variable (current working directory)
+			if cwd, err := os.Getwd(); err == nil {
+				vars["PROJECT_DIR"] = cwd
+			}
+
+			// 2. Load pipeline.Variables (lowest priority - defaults)
+			if pipeline.Variables != nil {
+				for k, v := range pipeline.Variables {
+					vars[k] = v
+				}
+			}
+
+			// 3. Load from vars.yaml if execution.Var is specified
 			if exec.Var != "" {
 				varsPath := parser.ResolveVarsPath(cfg.DirectAccess.PipelineDir)
 				fileVars, err := parser.ParseVarsSafe(varsPath, exec.Var)
@@ -1019,13 +1043,13 @@ func showExecutionSelectionMenu(cfg *config.Config) {
 					fmt.Scanln()
 					return
 				}
-				// Merge fileVars into vars
+				// Merge fileVars into vars (overrides pipeline defaults)
 				for k, v := range fileVars {
 					vars[k] = v
 				}
 			}
 
-			// 3. Merge execution.Variables (higher priority than vars.yaml)
+			// 4. Merge execution.Variables (higher priority than vars.yaml)
 			if exec.Variables != nil {
 				for k, v := range exec.Variables {
 					vars[k] = v
