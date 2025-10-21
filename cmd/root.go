@@ -485,12 +485,65 @@ func showPipelineMenu() {
 			fmt.Print("Enter pipeline name: ")
 			var name string
 			fmt.Scanln(&name)
-			if name != "" {
-				// Simulate pipeline create command
-				fmt.Printf("Creating pipeline: %s\n", name)
-				// Note: This would need to be implemented properly
-				fmt.Printf("⚠️  Create functionality not implemented in menu yet\n")
+			if name == "" {
+				fmt.Println("❌ Pipeline name cannot be empty")
+				fmt.Println("Press Enter to continue...")
+				fmt.Scanln()
+				break
 			}
+
+			// Validate pipeline name - reject names that would conflict with system files
+			reservedNames := []string{"vars", "scripts"}
+			for _, reserved := range reservedNames {
+				if name == reserved {
+					fmt.Printf("❌ Pipeline name '%s' is not allowed as it would conflict with system files\n", name)
+					fmt.Println("Press Enter to continue...")
+					fmt.Scanln()
+					break
+				}
+			}
+
+			filename := name + ".yaml"
+
+			// Determine where to save the pipeline file
+			var outputPath string
+			if cfg.DirectAccess.PipelineDir != "" {
+				// Use configured pipeline directory
+				outputPath = filepath.Join(cfg.DirectAccess.PipelineDir, filename)
+				// Ensure pipeline directory exists
+				if err := os.MkdirAll(cfg.DirectAccess.PipelineDir, 0755); err != nil {
+					fmt.Printf("❌ Failed to create pipeline directory: %v\n", err)
+					fmt.Println("Press Enter to continue...")
+					fmt.Scanln()
+					break
+				}
+			} else {
+				// Fallback to current working directory
+				outputPath = filename
+			}
+
+			// Check if file already exists
+			if _, err := os.Stat(outputPath); err == nil {
+				fmt.Printf("❌ Pipeline file '%s' already exists\n", outputPath)
+				fmt.Println("💡 Use a different name or remove the existing file if you want to recreate it")
+				fmt.Println("Press Enter to continue...")
+				fmt.Scanln()
+				break
+			}
+
+			// Get template
+			template := getDockerPipelineTemplate(name)
+
+			// Write to file
+			if err := os.WriteFile(outputPath, []byte(template), 0644); err != nil {
+				fmt.Printf("❌ Failed to create pipeline file: %v\n", err)
+				fmt.Println("Press Enter to continue...")
+				fmt.Scanln()
+				break
+			}
+
+			fmt.Printf("✅ Created pipeline template: %s\n", outputPath)
+			fmt.Println("📝 Edit the file to customize your pipeline configuration")
 			fmt.Println("Press Enter to continue...")
 			fmt.Scanln()
 
