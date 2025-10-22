@@ -29,6 +29,7 @@ type SSHClient struct {
 	config       *ssh.ClientConfig
 	host         string
 	port         string
+	proxyJump    string
 	persistent   bool
 	session      *ssh.Session // Persistent session for continuous commands
 	agentSession *ssh.Session // Persistent session for agent monitoring
@@ -40,7 +41,8 @@ type SSHClient struct {
 // provided, the key will be added as an additional auth method. If passphrase
 // is provided with an encrypted private key, it will be used to decrypt the key.
 // At least one auth method must be configured.
-func NewSSHClient(username, privateKeyPath, password, passphrase, host, port string) (*SSHClient, error) {
+// For multi-hop connections, provide proxyJump to specify a jump host.
+func NewSSHClient(username, privateKeyPath, password, passphrase, host, port string, proxyJump string) (*SSHClient, error) {
 	var authMethods []ssh.AuthMethod
 
 	// Prefer password auth if provided
@@ -93,13 +95,14 @@ func NewSSHClient(username, privateKeyPath, password, passphrase, host, port str
 		config:     config,
 		host:       host,
 		port:       port,
+		proxyJump:  proxyJump,
 		persistent: false,
 	}, nil
 }
 
 // NewPersistentSSHClient creates a new SSH client with persistent connection
-func NewPersistentSSHClient(username, privateKeyPath, password, passphrase, host, port string) (*SSHClient, error) {
-	client, err := NewSSHClient(username, privateKeyPath, password, passphrase, host, port)
+func NewPersistentSSHClient(username, privateKeyPath, password, passphrase, host, port string, proxyJump string) (*SSHClient, error) {
+	client, err := NewSSHClient(username, privateKeyPath, password, passphrase, host, port, proxyJump)
 	if err != nil {
 		return nil, err
 	}
@@ -110,12 +113,73 @@ func NewPersistentSSHClient(username, privateKeyPath, password, passphrase, host
 // Connect establishes the SSH connection
 func (c *SSHClient) Connect() error {
 	addr := fmt.Sprintf("%s:%s", c.host, c.port)
+
+	// Check if we need multi-hop connection
+	if c.proxyJump != "" {
+		return c.connectWithProxyJump(addr)
+	}
+
+	// Direct connection
 	client, err := ssh.Dial("tcp", addr, c.config)
 	if err != nil {
 		return fmt.Errorf("failed to dial: %v", err)
 	}
 	c.client = client
 	return nil
+}
+
+// connectWithProxyJump establishes a multi-hop SSH connection through a jump host
+func (c *SSHClient) connectWithProxyJump(targetAddr string) error {
+	// Parse proxyJump string (format: [user@]host[:port])
+	jumpHost, jumpPort := c.parseJumpHost(c.proxyJump)
+	jumpAddr := fmt.Sprintf("%s:%s", jumpHost, jumpPort)
+
+	// First, connect to the jump host
+	jumpClient, err := ssh.Dial("tcp", jumpAddr, c.config)
+	if err != nil {
+		return fmt.Errorf("failed to connect to jump host %s: %v", jumpAddr, err)
+	}
+
+	// Use the jump host as a proxy to dial the target host
+	conn, err := jumpClient.Dial("tcp", targetAddr)
+	if err != nil {
+		jumpClient.Close()
+		return fmt.Errorf("failed to dial target host %s through jump host: %v", targetAddr, err)
+	}
+
+	// Create SSH client connection using the tunneled connection
+	sshConn, chans, reqs, err := ssh.NewClientConn(conn, targetAddr, c.config)
+	if err != nil {
+		conn.Close()
+		jumpClient.Close()
+		return fmt.Errorf("failed to establish SSH connection through jump host: %v", err)
+	}
+
+	// Create the SSH client
+	c.client = ssh.NewClient(sshConn, chans, reqs)
+	return nil
+}
+
+// parseJumpHost parses the proxyJump string and returns host and port
+// Format: [user@]host[:port] - user is ignored as we use the same auth for jump host
+func (c *SSHClient) parseJumpHost(proxyJump string) (string, string) {
+	// Remove user@ prefix if present
+	if atIndex := strings.Index(proxyJump, "@"); atIndex != -1 {
+		proxyJump = proxyJump[atIndex+1:]
+	}
+
+	// Check if port is specified
+	if colonIndex := strings.LastIndex(proxyJump, ":"); colonIndex != -1 {
+		host := proxyJump[:colonIndex]
+		port := proxyJump[colonIndex+1:]
+		// Validate port is numeric
+		if _, err := strconv.Atoi(port); err == nil {
+			return host, port
+		}
+	}
+
+	// Default port if not specified
+	return proxyJump, "22"
 }
 
 // Close closes the SSH connection

@@ -38,7 +38,7 @@ type Executor struct {
 	// NewSSHClient allows tests to inject a fake SSH client factory. By default
 	// it uses sshclient.NewPersistentSSHClient and returns a concrete client
 	// that satisfies the SSHClient interface below.
-	NewSSHClient func(username, privateKeyPath, password, passphrase, host, port string) (SSHClient, error)
+	NewSSHClient func(username, privateKeyPath, password, passphrase, host, port, proxyJump string) (SSHClient, error)
 }
 
 // NewExecutor creates a new executor
@@ -54,8 +54,8 @@ func NewExecutor() *Executor {
 // ensureDefaults fills default factories that rely on external packages
 func (e *Executor) ensureDefaults() {
 	if e.NewSSHClient == nil {
-		e.NewSSHClient = func(username, privateKeyPath, password, passphrase, host, port string) (SSHClient, error) {
-			return sshclient.NewPersistentSSHClient(username, privateKeyPath, password, passphrase, host, port)
+		e.NewSSHClient = func(username, privateKeyPath, password, passphrase, host, port, proxyJump string) (SSHClient, error) {
+			return sshclient.NewPersistentSSHClient(username, privateKeyPath, password, passphrase, host, port, proxyJump)
 		}
 	}
 }
@@ -1012,9 +1012,10 @@ func (e *Executor) runWriteFileStep(step *types.Step, job *types.Job, config map
 			password, _ = config["_Password"].(string)
 		}
 		passphrase, _ := config["_Passphrase"].(string)
+		proxyJump, _ := config["ProxyJump"].(string)
 
 		e.ensureDefaults()
-		client, err := e.NewSSHClient(user, privateKey, password, passphrase, host, port)
+		client, err := e.NewSSHClient(user, privateKey, password, passphrase, host, port, proxyJump)
 		if err != nil {
 			return fmt.Errorf("failed to create SSH client: %v", err)
 		}
@@ -1134,10 +1135,11 @@ func (e *Executor) runCommandStep(step *types.Step, job *types.Job, config map[s
 		password, _ = config["_Password"].(string)
 	}
 	passphrase, _ := config["_Passphrase"].(string)
+	proxyJump, _ := config["ProxyJump"].(string)
 
 	// Create SSH client
 	e.ensureDefaults()
-	client, err := e.NewSSHClient(user, privateKey, password, passphrase, host, port)
+	client, err := e.NewSSHClient(user, privateKey, password, passphrase, host, port, proxyJump)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to create SSH client: %v", err)
 	}
@@ -1309,10 +1311,11 @@ func (e *Executor) runFileTransferStep(step *types.Step, job *types.Job, config 
 		password, _ = config["_Password"].(string)
 	}
 	passphrase, _ := config["_Passphrase"].(string)
+	proxyJump, _ := config["ProxyJump"].(string)
 
 	// Create SSH client
 	e.ensureDefaults()
-	client, err := e.NewSSHClient(user, privateKey, password, passphrase, host, port)
+	client, err := e.NewSSHClient(user, privateKey, password, passphrase, host, port, proxyJump)
 	if err != nil {
 		return fmt.Errorf("failed to create SSH client: %v", err)
 	}

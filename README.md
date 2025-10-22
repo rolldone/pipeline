@@ -18,6 +18,7 @@ A standalone CLI tool for executing automated pipeline workflows with interactiv
 - **Multi-Environment**: Support multiple environments with vars.yaml
 - **Job Execution Tracking**: Visual indicators with HEAD markers for progress tracking
 - **SSH Integration**: Direct server access through configured SSH commands
+- **Multi-Hop SSH**: Access servers through jump hosts/bastion servers
 - **Configuration Management**: Flexible YAML-based configuration system
 - **Execution Validation**: Validates pipeline files, hosts, jobs, and variables before execution
 - **Key-Based Job Referencing**: Reference jobs by key for cleaner execution configurations
@@ -134,6 +135,155 @@ Pipeline supports three SSH authentication methods in priority order:
 | `Password` | string | SSH password (standard field) |
 | `_Password` | string | SSH password (hidden field, takes priority) |
 | `_Passphrase` | string | Passphrase for encrypted SSH private keys |
+| `ProxyJump` | string | Jump host for multi-hop SSH connections |
+
+### Multi-Hop SSH Support
+
+Pipeline supports multi-hop SSH connections through jump hosts/bastion servers. This allows accessing servers that are not directly reachable from the pipeline host.
+
+#### How Multi-Hop Works
+
+Multi-hop SSH establishes connections through intermediate jump hosts:
+```
+Pipeline Host → Jump Host (bastion) → Target Server
+```
+
+The jump host acts as a proxy, forwarding SSH traffic to the final destination.
+
+#### ProxyJump Configuration
+
+Use the `ProxyJump` field in SSH configurations to specify a jump host:
+
+```yaml
+ssh_configs:
+  # Jump host configuration (direct access required)
+  - Host: bastion
+    HostName: bastion.example.com
+    User: bastion-user
+    IdentityFile: ~/.ssh/bastion_key
+    Port: 22
+
+  # Target server accessed through jump host
+  - Host: app-server
+    HostName: app-server.internal
+    User: app-user
+    IdentityFile: ~/.ssh/app_key
+    ProxyJump: bastion  # Reference to jump host by Host alias
+```
+
+#### ProxyJump Format Options
+
+The `ProxyJump` field supports several formats:
+
+```yaml
+ssh_configs:
+  # 1. Host alias (recommended - references another SSH config)
+  - Host: web-server
+    HostName: web01.internal
+    User: deploy
+    ProxyJump: bastion
+
+  # 2. Full specification with user and port
+  - Host: db-server
+    HostName: db01.internal
+    User: dbadmin
+    ProxyJump: bastion-user@bastion.example.com:2222
+
+  # 3. Host and port only
+  - Host: api-server
+    HostName: api01.internal
+    User: apiuser
+    ProxyJump: bastion.example.com:2222
+
+  # 4. Host only (default port 22)
+  - Host: cache-server
+    HostName: cache01.internal
+    User: cacheuser
+    ProxyJump: bastion.example.com
+```
+
+#### Authentication Flow
+
+For multi-hop connections, authentication occurs in two stages:
+
+1. **Jump Host Authentication**: Pipeline authenticates with the jump host using the same methods as direct connections
+2. **Target Host Authentication**: After establishing the jump connection, pipeline authenticates with the target host
+
+Both hosts can use different authentication methods (password, key, passphrase) independently.
+
+#### Multi-Hop Example
+
+```yaml
+project_name: multi-hop-deployment
+
+ssh_configs:
+  # Bastion/jump host
+  - Host: bastion
+    HostName: bastion.company.com
+    User: bastion-user
+    IdentityFile: ~/.ssh/bastion_key
+    _Passphrase: bastion-passphrase
+
+  # Application servers behind bastion
+  - Host: app01
+    HostName: app01.internal.company.com
+    User: app-deploy
+    IdentityFile: ~/.ssh/app_key
+    ProxyJump: bastion
+
+  - Host: app02
+    HostName: app02.internal.company.com
+    User: app-deploy
+    IdentityFile: ~/.ssh/app_key
+    ProxyJump: bastion
+
+  # Database server with different jump host
+  - Host: db01
+    HostName: db01.internal.company.com
+    User: db-admin
+    IdentityFile: ~/.ssh/db_key
+    ProxyJump: db-bastion-user@db-bastion.company.com:2222
+
+executions:
+  - name: "Deploy to All Servers"
+    key: "deploy-all"
+    pipeline: "deploy.yaml"
+    hosts: ["app01", "app02", "db01"]  # Mix of direct and multi-hop hosts
+    jobs: ["deploy-app", "migrate-db"]
+```
+
+#### Security Considerations
+
+- **Jump Host Security**: Ensure jump hosts are properly secured and monitored
+- **Access Control**: Limit SSH access to jump hosts and implement proper authorization
+- **Network Security**: Use VPNs or private networks where possible instead of public jump hosts
+- **Key Management**: Use different SSH keys for jump hosts and target servers
+- **Logging**: Enable SSH logging on jump hosts for audit trails
+
+#### Troubleshooting Multi-Hop Connections
+
+**Common Issues:**
+
+1. **"Failed to connect to jump host"**
+   - Verify jump host SSH config is correct
+   - Check network connectivity to jump host
+   - Ensure jump host allows SSH connections
+
+2. **"Failed to dial target host through jump host"**
+   - Verify target host address is reachable from jump host
+   - Check if jump host has proper routing/firewall rules
+   - Test SSH connection from jump host to target manually
+
+3. **Authentication failures**
+   - Ensure both jump and target host credentials are correct
+   - Check if target host accepts connections from jump host IP
+   - Verify SSH keys are properly installed on respective hosts
+
+**Debug Tips:**
+- Test jump host connection separately: `ssh bastion-user@bastion.example.com`
+- Test target connection from jump host: `ssh -J bastion-user@bastion.example.com target-user@target.internal`
+- Check SSH verbose output for detailed connection information
+- Review pipeline logs in `.sync_temp/logs/` for connection errors
 
 ### Authentication Examples
 
