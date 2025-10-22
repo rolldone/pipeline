@@ -110,54 +110,128 @@ pipeline
 
 Select from available pipeline executions and SSH connections using arrow keys.
 
-## Configuration
+## SSH Configuration & Authentication
 
-Pipeline uses a `pipeline.yaml` configuration file. You can specify a custom config file:
+Pipeline supports multiple SSH authentication methods for secure remote execution:
+
+### SSH Authentication Methods
+
+Pipeline supports three SSH authentication methods in priority order:
+
+1. **Public Key with Passphrase** (recommended for encrypted keys)
+2. **Public Key without Passphrase** (for unencrypted keys)
+3. **Password Authentication** (fallback method)
+
+### SSH Configuration Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `HostName` | string | Actual hostname/IP to connect to |
+| `Host` | string | Alias for HostName (fallback) |
+| `User` | string | SSH username |
+| `Port` | string | SSH port (default: 22) |
+| `IdentityFile` | string | Path to SSH private key file |
+| `Password` | string | SSH password (standard field) |
+| `_Password` | string | SSH password (hidden field, takes priority) |
+| `_Passphrase` | string | Passphrase for encrypted SSH private keys |
+
+### Authentication Examples
+
+#### Public Key with Passphrase (Encrypted Key)
+```yaml
+ssh_configs:
+  - Host: prod-server
+    HostName: 192.168.1.100
+    User: deploy
+    Port: 22
+    IdentityFile: ~/.ssh/id_rsa_encrypted
+    _Passphrase: my-secret-passphrase
+```
+
+#### Public Key without Passphrase (Unencrypted Key)
+```yaml
+ssh_configs:
+  - Host: dev-server
+    HostName: dev.example.com
+    User: ubuntu
+    IdentityFile: ~/.ssh/id_ed25519
+```
+
+#### Password Authentication
+```yaml
+ssh_configs:
+  - Host: legacy-server
+    HostName: legacy.example.com
+    User: admin
+    _Password: my-ssh-password
+```
+
+### Authentication Priority Logic
+
+Pipeline attempts authentication methods in this order:
+
+1. **Public Key + Passphrase**: If `IdentityFile` and `_Passphrase` are both provided
+2. **Public Key Only**: If `IdentityFile` is provided but no `_Passphrase`
+3. **Password**: If `_Password` (or `Password`) is provided
+
+### Encrypted SSH Keys Setup
+
+For enhanced security, use encrypted SSH private keys with passphrases:
 
 ```bash
-pipeline --config custom.yaml list
+# Generate encrypted SSH key pair
+ssh-keygen -t ed25519 -C "pipeline-deploy" -f ~/.ssh/pipeline_key
+
+# Copy public key to server
+ssh-copy-id -i ~/.ssh/pipeline_key.pub user@server
+
+# Configure in pipeline.yaml
+ssh_configs:
+  - Host: secure-server
+    HostName: server.example.com
+    User: user
+    IdentityFile: ~/.ssh/pipeline_key
+    _Passphrase: your-secure-passphrase
 ```
 
-### Config Structure
+### Security Best Practices
 
-```yaml
-project_name: my-project
+- **Use encrypted keys**: Always encrypt SSH private keys with strong passphrases
+- **Hidden fields**: Use `_Password` and `_Passphrase` fields to keep sensitive data out of version control
+- **Key rotation**: Regularly rotate SSH keys and update passphrases
+- **Access control**: Limit SSH key access to specific servers and users
 
-var:
-  auth:
-    username: user
-    host: example.com
-    port: 22
-    remotePath: /home/user
+### Troubleshooting SSH Authentication
 
-direct_access:
-  pipeline_dir: ./pipelines
-  executions:
-    - name: "Deploy to Production"
-      key: "prod-deploy"
-      pipeline: "deploy.yaml"
-      jobs: ["build", "deploy"]  # Optional: specific jobs to run
-      hosts: ["prod-server"]
-      variables: {}
-  ssh_configs:
-    - Host: prod-server
-      HostName: =var.auth.host
-      User: =var.auth.username
-      Port: =var.auth.port
-      IdentityFile: ~/.ssh/id_rsa
-  ssh_commands:
-    - access_name: "Production Server"
-      command: "ssh prod-server"
-    - access_name: "Database Server"
-      command: "ssh db-server"
-```
+**Common Issues:**
 
-### Configuration Sections
+1. **"Permission denied (publickey)"**
+   - Check `IdentityFile` path is correct
+   - Ensure public key is installed on server
+   - Verify key permissions: `chmod 600 ~/.ssh/private_key`
 
-- **`var`**: Template variables for reuse across config
-- **`direct_access.executions`**: Pipeline execution definitions
-- **`direct_access.ssh_configs`**: SSH connection configurations
-- **`direct_access.ssh_commands`**: Direct SSH access commands (shown in menu)
+2. **"Permission denied (publickey,password)"**
+   - For encrypted keys: verify `_Passphrase` is correct
+   - For password auth: check `_Password` field
+
+3. **"Host key verification failed"**
+   - Server's host key changed or first connection
+   - Pipeline automatically handles known_hosts for you
+
+**Debug Tips:**
+- Pipeline logs SSH connection attempts
+- Check `.sync_temp/logs/` for detailed error messages
+- Test SSH connection manually: `ssh -i keyfile user@host`
+
+### SSH Connection Management
+
+Pipeline automatically:
+- Manages SSH known_hosts verification
+- Creates temporary SSH config files in `.sync_temp/.ssh/`
+- Handles connection pooling for performance
+- Cleans up connections after execution
+
+All SSH operations (command execution, file transfers, rsync) use the same authentication configuration.
 
 ## Usage
 
