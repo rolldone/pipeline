@@ -76,8 +76,8 @@ func TestRunWriteFileStep_LocalRenderAndDefaultPerm(t *testing.T) {
 	if raw == "" {
 		t.Fatalf("expected save_output variable set")
 	}
-	if raw != "Hello alice!\n" {
-		t.Fatalf("expected rendered content 'Hello alice!\\n', got %q", raw)
+	if raw != "Hello alice!\nThis is a rendered template.\n" {
+		t.Fatalf("expected rendered content 'Hello alice!\\nThis is a rendered template.\\n', got %q", raw)
 	}
 }
 

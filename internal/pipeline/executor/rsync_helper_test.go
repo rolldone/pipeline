@@ -17,7 +17,7 @@ func TestBuildRsyncArgs_SoftVsForce(t *testing.T) {
 	}
 	entries := []struct{ Source, Destination string }{{Source: "dist/", Destination: "/var/www/"}}
 
-	args, err := e.buildRsyncArgSlices(step, "remote", "web-1", entries)
+	args, err := e.buildRsyncArgSlices(step, "remote", "web-1", map[string]interface{}{}, entries)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -38,7 +38,7 @@ func TestBuildRsyncArgs_SoftVsForce(t *testing.T) {
 	// Now test force
 	step.DeletePolicy = "force"
 	step.ConfirmForce = true
-	args2, err := e.buildRsyncArgSlices(step, "remote", "web-1", entries)
+	args2, err := e.buildRsyncArgSlices(step, "remote", "web-1", map[string]interface{}{}, entries)
 	if err != nil {
 		t.Fatalf("unexpected error for force: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestBuildRsyncArgs_IncludeExcludeOrdering(t *testing.T) {
 		Excludes: []string{"*"},
 	}
 	entries := []struct{ Source, Destination string }{{Source: "assets/", Destination: "/var/www/assets/"}}
-	args, err := e.buildRsyncArgSlices(step, "remote", "web-1", entries)
+	args, err := e.buildRsyncArgSlices(step, "remote", "web-1", map[string]interface{}{}, entries)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

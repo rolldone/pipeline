@@ -67,7 +67,7 @@ func TestRunRsyncStep_IncludesRenderWarningsInSaveOutput(t *testing.T) {
 	// Also bypass prepareRsyncEntriesWithTemplates by setting it to a local call wrapper via closure (not possible),
 	// Instead we will call buildRsyncArgSlices and then replicate the core of runRsyncStep here to call e.ExecCommand and write summary.
 
-	argSlices, err := e.buildRsyncArgSlices(step, "local", "", entries)
+	argSlices, err := e.buildRsyncArgSlices(step, "local", "", map[string]interface{}{}, entries)
 	if err != nil {
 		t.Fatalf("buildRsyncArgSlices failed: %v", err)
 	}

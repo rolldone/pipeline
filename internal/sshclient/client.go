@@ -37,9 +37,10 @@ type SSHClient struct {
 // NewSSHClient creates a new SSH client
 // NewSSHClient creates a new SSH client. If password is provided it will be
 // used as the first auth method (password-first). If privateKeyPath is
-// provided, the key will be added as an additional auth method. At least one
-// auth method must be configured.
-func NewSSHClient(username, privateKeyPath, password, host, port string) (*SSHClient, error) {
+// provided, the key will be added as an additional auth method. If passphrase
+// is provided with an encrypted private key, it will be used to decrypt the key.
+// At least one auth method must be configured.
+func NewSSHClient(username, privateKeyPath, password, passphrase, host, port string) (*SSHClient, error) {
 	var authMethods []ssh.AuthMethod
 
 	// Prefer password auth if provided
@@ -56,7 +57,15 @@ func NewSSHClient(username, privateKeyPath, password, host, port string) (*SSHCl
 				return nil, fmt.Errorf("unable to read private key: %v", err)
 			}
 		} else {
-			signer, err := ssh.ParsePrivateKey(key)
+			var signer ssh.Signer
+			var err error
+			if passphrase != "" {
+				// Use passphrase to decrypt encrypted private key
+				signer, err = ssh.ParsePrivateKeyWithPassphrase(key, []byte(passphrase))
+			} else {
+				// Parse private key without passphrase
+				signer, err = ssh.ParsePrivateKey(key)
+			}
 			if err != nil {
 				if len(authMethods) == 0 {
 					return nil, fmt.Errorf("unable to parse private key: %v", err)
@@ -89,8 +98,8 @@ func NewSSHClient(username, privateKeyPath, password, host, port string) (*SSHCl
 }
 
 // NewPersistentSSHClient creates a new SSH client with persistent connection
-func NewPersistentSSHClient(username, privateKeyPath, password, host, port string) (*SSHClient, error) {
-	client, err := NewSSHClient(username, privateKeyPath, password, host, port)
+func NewPersistentSSHClient(username, privateKeyPath, password, passphrase, host, port string) (*SSHClient, error) {
+	client, err := NewSSHClient(username, privateKeyPath, password, passphrase, host, port)
 	if err != nil {
 		return nil, err
 	}

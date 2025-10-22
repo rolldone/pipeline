@@ -35,7 +35,7 @@ func TestPrepareRsyncEntriesWithTemplates_TextRender(t *testing.T) {
 
 	vars := types.Vars{"name": "World"}
 
-	entries, cleanup, warnings, err := e.prepareRsyncEntriesWithTemplates(step, raw, vars)
+	entries, cleanup, warnings, err := e.prepareRenderAndStage(step, raw, vars)
 	defer cleanup()
 	if err != nil {
 		t.Fatalf("prepareRsyncEntriesWithTemplates failed: %v", err)
@@ -85,7 +85,7 @@ func TestPrepareRsyncEntriesWithTemplates_BinaryCopy(t *testing.T) {
 
 	vars := types.Vars{"unused": "x"}
 
-	entries, cleanup, warnings, err := e.prepareRsyncEntriesWithTemplates(step, raw, vars)
+	entries, cleanup, warnings, err := e.prepareRenderAndStage(step, raw, vars)
 	defer cleanup()
 	if err != nil {
 		t.Fatalf("prepareRsyncEntriesWithTemplates failed: %v", err)

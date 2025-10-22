@@ -50,7 +50,7 @@ func TestPrepareRsyncEntriesWithTemplates_RenderWriteFailureFallback(t *testing.
 
 	vars := types.Vars{"var": "X"}
 
-	entries, cleanup, warnings, err := e.prepareRsyncEntriesWithTemplates(step, raw, vars)
+	entries, cleanup, warnings, err := e.prepareRenderAndStage(step, raw, vars)
 	defer cleanup()
 	if err != nil {
 		t.Fatalf("prepareRsyncEntriesWithTemplates failed: %v", err)

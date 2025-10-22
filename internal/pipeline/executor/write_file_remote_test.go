@@ -35,7 +35,7 @@ func TestRunWriteFileStep_RemoteUploadsUseUploadBytes(t *testing.T) {
 	e := NewExecutor()
 	// inject mock factory
 	mock := &mockSSHClient{}
-	e.NewSSHClient = func(username, privateKeyPath, password, host, port string) (SSHClient, error) {
+	e.NewSSHClient = func(username, privateKeyPath, password, passphrase, host, port string) (SSHClient, error) {
 		return mock, nil
 	}
 
