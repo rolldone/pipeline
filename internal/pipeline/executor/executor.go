@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -703,7 +702,7 @@ func (e *Executor) runRsyncStep(step *types.Step, job *types.Job, config map[str
 		host, _ = config["Host"].(string)
 	}
 
-	argSlices, err := e.buildRsyncArgSlices(step, effectiveMode, host, entries)
+	argSlices, err := e.buildRsyncArgSlices(step, effectiveMode, host, config, entries)
 	if err != nil {
 		return err
 	}
@@ -1009,6 +1008,9 @@ func (e *Executor) runWriteFileStep(step *types.Step, job *types.Job, config map
 		}
 		privateKey, _ := config["IdentityFile"].(string)
 		password, _ := config["Password"].(string)
+		if password == "" {
+			password, _ = config["_Password"].(string)
+		}
 
 		e.ensureDefaults()
 		client, err := e.NewSSHClient(user, privateKey, password, host, port)
@@ -1127,6 +1129,9 @@ func (e *Executor) runCommandStep(step *types.Step, job *types.Job, config map[s
 	}
 	privateKey, _ := config["IdentityFile"].(string)
 	password, _ := config["Password"].(string)
+	if password == "" {
+		password, _ = config["_Password"].(string)
+	}
 
 	// Create SSH client
 	e.ensureDefaults()
@@ -1298,6 +1303,9 @@ func (e *Executor) runFileTransferStep(step *types.Step, job *types.Job, config 
 	}
 	privateKey, _ := config["IdentityFile"].(string)
 	password, _ := config["Password"].(string)
+	if password == "" {
+		password, _ = config["_Password"].(string)
+	}
 
 	// Create SSH client
 	e.ensureDefaults()
@@ -2208,119 +2216,7 @@ func (e *Executor) runLocalFileTransfer(step *types.Step, vars types.Vars) error
 	return e.copyLocalPath(source, destination)
 }
 
-// runLocalFileTransferWithTemplate handles file transfer with template rendering
-// (template rendering removed; use write_file step)
-
-// copyLocalPath copies a file or directory from source to destination
-func (e *Executor) copyLocalPath(source, destination string) error {
-	// Check if source is a glob pattern
-	if strings.Contains(source, "*") {
-		return e.copyGlobPattern(source, destination)
-	}
-
-	// Get source info
-	info, err := os.Stat(source)
-	if err != nil {
-		return fmt.Errorf("failed to stat source %s: %v", source, err)
-	}
-
-	if info.IsDir() {
-		return e.copyDirectory(source, destination)
-	} else {
-		return e.copyFile(source, destination)
-	}
-}
-
-// copyFile copies a single file
-func (e *Executor) copyFile(source, destination string) error {
-	// Ensure destination directory exists
-	destDir := filepath.Dir(destination)
-	if err := os.MkdirAll(destDir, 0755); err != nil {
-		return fmt.Errorf("failed to create destination directory %s: %v", destDir, err)
-	}
-
-	// Copy file
-	srcFile, err := os.Open(source)
-	if err != nil {
-		return fmt.Errorf("failed to open source file %s: %v", source, err)
-	}
-	defer srcFile.Close()
-
-	destFile, err := os.Create(destination)
-	if err != nil {
-		return fmt.Errorf("failed to create destination file %s: %v", destination, err)
-	}
-	defer destFile.Close()
-
-	_, err = io.Copy(destFile, srcFile)
-	if err != nil {
-		return fmt.Errorf("failed to copy file %s to %s: %v", source, destination, err)
-	}
-
-	fmt.Printf("✅ File copied: %s → %s\n", source, destination)
-	return nil
-}
-
-// copyDirectory copies a directory recursively
-func (e *Executor) copyDirectory(source, destination string) error {
-	return filepath.Walk(source, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		// Calculate relative path from source
-		relPath, err := filepath.Rel(source, path)
-		if err != nil {
-			return err
-		}
-
-		// Construct destination path
-		destPath := filepath.Join(destination, relPath)
-
-		if info.IsDir() {
-			// Create directory
-			return os.MkdirAll(destPath, info.Mode())
-		} else {
-			// Copy file
-			return e.copyFile(path, destPath)
-		}
-	})
-}
-
-// copyGlobPattern handles glob patterns like src/**/*.js
-func (e *Executor) copyGlobPattern(pattern, destination string) error {
-	matches, err := filepath.Glob(pattern)
-	if err != nil {
-		return fmt.Errorf("invalid glob pattern %s: %v", pattern, err)
-	}
-	if len(matches) == 0 {
-		return fmt.Errorf("no files match glob pattern %s", pattern)
-	}
-	// Ensure destination exists as a directory
-	if err := os.MkdirAll(destination, 0755); err != nil {
-		return fmt.Errorf("failed to create destination directory %s: %v", destination, err)
-	}
-	for _, m := range matches {
-		info, err := os.Stat(m)
-		if err != nil {
-			return fmt.Errorf("failed to stat matched file %s: %v", m, err)
-		}
-		base := filepath.Base(m)
-		destPath := filepath.Join(destination, base)
-		if info.IsDir() {
-			if err := e.copyDirectory(m, destPath); err != nil {
-				return err
-			}
-		} else {
-			if err := e.copyFile(m, destPath); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-// copyGlobPattern handles glob patterns like src/**/*.js
+// prepareRenderAndStage prepares files for rendering and staging
 func (e *Executor) prepareRenderAndStage(step *types.Step, rawEntries []struct {
 	Source      string
 	Destination string
@@ -2472,11 +2368,77 @@ func (e *Executor) prepareRenderAndStage(step *types.Step, rawEntries []struct {
 	return ret, cleanup, renderWarnings, nil
 }
 
-// prepareRsyncEntriesWithTemplates kept as compatibility shim that calls the new helper
-func (e *Executor) prepareRsyncEntriesWithTemplates(step *types.Step, rawEntries []struct {
-	Source      string
-	Destination string
-	Template    string
-}, vars types.Vars) ([]struct{ Source, Destination string }, func(), []map[string]string, error) {
-	return e.prepareRenderAndStage(step, rawEntries, vars)
+// generateExpectScriptForSSH generates an expect script for SSH password authentication
+func (e *Executor) generateExpectScriptForSSH(host, user, port, password string) (string, error) {
+	// Create temp directory for expect script
+	os.MkdirAll(e.tempDir, 0755)
+	tempFile, err := os.CreateTemp(e.tempDir, "expect_ssh_*.exp")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp expect script: %v", err)
+	}
+	defer tempFile.Close()
+
+	// Write expect script
+	script := fmt.Sprintf(`#!/usr/bin/expect -f
+set timeout 30
+spawn ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null %s@%s -p %s
+expect {
+    "password:" {
+        send "%s\r"
+        interact
+    }
+    "yes/no" {
+        send "yes\r"
+        expect "password:"
+        send "%s\r"
+        interact
+    }
+    timeout {
+        exit 1
+    }
+    eof {
+        exit 0
+    }
+}
+`, user, host, port, password, password)
+
+	if _, err := tempFile.WriteString(script); err != nil {
+		return "", fmt.Errorf("failed to write expect script: %v", err)
+	}
+
+	// Make executable
+	if err := os.Chmod(tempFile.Name(), 0755); err != nil {
+		return "", fmt.Errorf("failed to make expect script executable: %v", err)
+	}
+
+	return tempFile.Name(), nil
+}
+
+// copyLocalPath copies a file or directory locally
+func (e *Executor) copyLocalPath(src, dst string) error {
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		return fmt.Errorf("failed to stat source %s: %v", src, err)
+	}
+
+	if srcInfo.IsDir() {
+		// Copy directory recursively
+		return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			relPath, _ := filepath.Rel(src, path)
+			target := filepath.Join(dst, relPath)
+			if info.IsDir() {
+				return os.MkdirAll(target, 0755)
+			}
+			return copyFile(path, target)
+		})
+	} else {
+		// Copy single file
+		if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+			return fmt.Errorf("failed to create destination dir: %v", err)
+		}
+		return copyFile(src, dst)
+	}
 }

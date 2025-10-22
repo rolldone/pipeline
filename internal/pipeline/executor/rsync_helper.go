@@ -9,7 +9,7 @@ import (
 
 // buildRsyncArgSlices builds rsync argument slices for given entries without executing rsync.
 // This is a pure helper used for unit testing arg construction and validation.
-func (e *Executor) buildRsyncArgSlices(step *types.Step, jobMode string, host string, entries []struct{ Source, Destination string }) ([][]string, error) {
+func (e *Executor) buildRsyncArgSlices(step *types.Step, jobMode string, host string, config map[string]interface{}, entries []struct{ Source, Destination string }) ([][]string, error) {
 	var all [][]string
 
 	if step == nil {
@@ -69,7 +69,29 @@ func (e *Executor) buildRsyncArgSlices(step *types.Step, jobMode string, host st
 	_ = time.Now()
 
 	if jobMode != "local" {
-		base = append(base, "-e", "ssh -F .sync_temp/.ssh/config")
+		// Check if password authentication is needed
+		password, hasPassword := config["Password"].(string)
+		if hasPassword && password != "" {
+			// Use sshpass for password authentication with rsync
+			port, _ := config["Port"].(string)
+			if port == "" {
+				port = "22"
+			}
+			base = append(base, "-e", fmt.Sprintf("sshpass -p '%s' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o PubkeyAuthentication=no -p %s", password, port))
+		} else {
+			// Check for _Password field as fallback
+			password, _ = config["_Password"].(string)
+			if password != "" {
+				// Use sshpass for password authentication with rsync using _Password
+				port, _ := config["Port"].(string)
+				if port == "" {
+					port = "22"
+				}
+				base = append(base, "-e", fmt.Sprintf("sshpass -p '%s' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o PubkeyAuthentication=no -p %s", password, port))
+			} else {
+				base = append(base, "-e", "ssh -F .sync_temp/.ssh/config")
+			}
+		}
 	}
 
 	for _, ent := range entries {

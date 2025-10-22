@@ -876,6 +876,10 @@ func generateSSHTempConfig(cfg *config.Config, hostName string) error {
 			if key == "Host" {
 				continue
 			}
+			// Skip fields starting with "_" (internal fields like _Password)
+			if strings.HasPrefix(key, "_") {
+				continue
+			}
 
 			if valStr := fmt.Sprintf("%v", val); valStr != "" {
 				// Khusus untuk RemoteCommand: jangan quote agar tidak ada petik ganda
