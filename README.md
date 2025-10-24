@@ -889,99 +889,64 @@ Behavior:
 - If multiple files are specified, `destination` must be a directory (ending with `/` or already a directory) — otherwise the step will error.
 - Backward compatibility: if `files` is not provided, `source` / `sources` will work as before.
 
-## Rsync-based file transfer step (`rsync_file`)
+## File transfer and migration notes (rsync_file removed)
 
-This project supports an `rsync_file` step that wraps the system `rsync` binary. It provides more advanced include/exclude, delete, and performance options compared to the built-in `file_transfer` step.
+The legacy `rsync_file` step has been removed. Use `file_transfer` (and where appropriate `write_file`) instead.
 
-Important notes:
-- Requires `rsync` installed on the machine running the pipeline and on remote hosts when running in `remote` mode.
-- The step uses the existing SSH configuration created under `.sync_temp/.ssh/config` so rsync remote invocations use `-e "ssh -F .sync_temp/.ssh/config"`.
-- `rsync_file` does not render file contents. If you previously relied on templating before rsync, pre-render files using `write_file` into a temporary directory and rsync that directory.
+Migration notes
+- If you previously used `rsync_file`, migrate to `file_transfer`. There is no one-to-one mapping for every rsync flag, but the typical YAML changes look like this:
 
-Example:
+Old (`rsync_file`):
 
 ```yaml
 - name: "sync-assets"
   type: "rsync_file"
-  includes: ["*/", "*.js", "*.css"]
-  excludes: ["*.map"]
-  options: ["--progress"]
-  delete_policy: "soft"       # soft (default) or force
-  confirm_force: false         # must be true when delete_policy: force
-  prune_empty_dirs: true
-  compress: true
-  dry_run: false
-  direction: "upload"
   source: "dist/"
-  destination: "/var/www/assets/"
-  save_output: "rsync_summary"
+  destination: "/var/www/app/"
+  exclude: ["*.tmp"]
 ```
 
-Fields (rsync-specific):
-
-| Field | Type | Default | Description |
-|---|---:|---:|---|
-| `includes` | []string | - | Maps to `--include=` patterns (order preserved)
-| `excludes` | []string | - | Maps to `--exclude=` patterns
-| `options` | []string | - | Additional rsync flags (e.g. `--progress`, `--chmod`)
-| `delete_policy` | string | `soft` | `soft` disallows destructive `--delete` options; `force` enables `--delete` but requires `confirm_force: true`
-| `delete_excluded` | bool | false | Maps to `--delete-excluded` (only when `delete_policy: force`)
-| `compress` | bool | true | Use `-z` when running remote
-| `prune_empty_dirs` | bool | false | Maps to `--prune-empty-dirs`
-| `dry_run` | bool | false | Maps to `--dry-run` for preview
-
-SaveOutput (structured JSON)
-When `save_output` is set on an `rsync_file` step, the executor will add `--stats` to the rsync invocation and parse the textual stats. A JSON summary is saved into the pipeline's context variables under the given key. Example saved JSON:
-
-```json
-{
-  "exit_code": 0,
-  "reason": "success",        // success | idle_timeout | total_timeout | error
-  "duration_seconds": 2,
-  "files_transferred": 12,
-  "bytes_transferred": 1234567,
-  "stdout_tail": "...last lines...",
-  "stderr_tail": "...last lines..."
-}
-```
-
-The `reason` field helps callers distinguish between normal success and various termination reasons (idle timeout, total timeout, or other errors).
-
-Safety
-- `delete_policy: force` requires `confirm_force: true` to avoid accidental destructive syncs.
-- When `delete_policy: soft`, specifying `--delete` or `--delete-excluded` through `options` will be rejected by the arg-builder.
-
-Integration testing
-- See `docs/INTEGRATION_TESTING.md` for instructions to run a Docker-based SSH server with `rsync` installed for integration tests.
-
-### Example: per-file entries (`files: []`) with `rsync_file`
-
-Use the `files` array when you need to transfer individual files with different destinations or templates. `rsync_file` accepts the same `files` entries as `file_transfer` — the executor expands globs, preserves relative paths when destination is a directory, and runs rsync per resolved entry.
+New (`file_transfer`):
 
 ```yaml
-- name: "sync-configs-and-assets"
-  type: "rsync_file"
-  includes: ["*/", "*.conf"]
-  excludes: ["*.tmp"]
-  options: ["--progress"]
-  delete_policy: "force"
-  confirm_force: true
-  compress: true
-  direction: "upload"
-  files:
-    - source: "nginx/nginx.conf"
-      destination: "/etc/nginx/nginx.conf"
-    - source: "site/assets/"
-      destination: "/var/www/site/assets/"
-    - source: "site/robots.txt"
-      destination: "/var/www/site/robots.txt"
-  save_output: "rsync_summary"
+- name: "sync-assets"
+  type: "file_transfer"
+  source: "dist/"
+  destination: "/var/www/app/"
+  exclude: ["*.tmp"]     # executor will send these as ignores to the agent
 ```
 
-Notes:
-- `files` entries may include glob patterns (e.g. `site/**/*.js`) — the executor expands them locally before invoking rsync.
-- If you require per-file templating (variable interpolation inside file contents), either use `file_transfer` (which renders per-file) or pre-render files to a temporary directory and rsync that directory.
-- `rsync_file` executes rsync per resolved entry; for many small files it's usually more efficient to sync a directory instead of many individual entries.
+If you used templating to modify file contents, prefer the `write_file` step which renders templates and uploads rendered bytes (see the `write_file` section above).
+
+`ignores` (gitignore-style)
+- The `file_transfer` step (and the remote agent) accept `ignores` which follow gitignore semantics via `go-gitignore`.
+- Negation patterns are supported (prefix with `!`) and later patterns override earlier ones (last-match-wins).
+
+Example:
+
+```yaml
+- name: "upload-logs"
+  type: "file_transfer"
+  source: "logs/"
+  destination: "/var/backups/logs/"
+  ignores:
+    - "*.log"
+    - "!important.log"   # keep important.log even though *.log is excluded
+```
+
+Agent & config behavior
+- The executor uploads step configuration to the remote path `.sync_temp/config.json`. The agent reads this file from `.sync_temp/config.json` (or from the executable directory when running inside `.sync_temp`).
+- When a `file_transfer` runs and the agent binary is missing on the remote, the executor will attempt to build/deploy `pipeline-agent` programmatically. The executor looks for `sub_app/agent` in the project tree (or near the executable) when building. If you install a bundled binary without the `sub_app/agent` source, the executor will not be able to build the agent.
+- Working directory normalization: the executor normalizes `working_dir` before writing the config so the agent doesn't `chdir` into duplicated parent paths when `.sync_temp` is nested.
+
+Delete / force semantics
+- By default, files matched by `ignores` are not deleted by the executor. The `force` delete semantics do not override `ignores` (ignored files are preserved) to avoid accidental data loss.
+- If you require different behavior (for example, an explicit destructive sync), prefer adding an explicit include list or a dedicated step that performs manual deletion after review.
+
+Templating
+- `file_transfer` focuses on binary-safe transfer. For content rendering use `write_file` (see above). `write_file` supports common placeholder forms like `{{name}}`, `{{ name }}`, `{{.name}}`, and `{{ .name }}` when `template: "enabled"` is set.
+
+If you want, I can add a short migration guide file under `docs/` with examples for common rsync flags and their equivalents (include/exclude/ignores, preserve perms via `perm`, symlink handling notes). 
 
 ## Running Pipelines
 

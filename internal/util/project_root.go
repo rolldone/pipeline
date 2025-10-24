@@ -54,15 +54,11 @@ func GetProjectRoot() (string, error) {
 
 		// Additional validation: ensure this is actually the make-sync project
 		// by checking for expected structure
-		if !isValidMakeSyncProject(projectRoot) {
-			// If working dir is not make-sync project, try to find it
-			// This handles the case where user is in a different project
-			actualRoot, err := findMakeSyncProjectRoot()
+		if !isValidPipelineProject(projectRoot) {
+			// If working dir is not pipeline project, try to find it
+			actualRoot, err := findPipelineProjectRoot()
 			if err == nil {
-				// fmt.Printf("DEBUG: Working dir is not make-sync project, using detected: %s\n", actualRoot)
 				projectRoot = actualRoot
-			} else {
-				// fmt.Printf("DEBUG: Could not find make-sync project, using working dir: %s\n", projectRoot)
 			}
 		}
 
@@ -195,12 +191,12 @@ func findProjectRootFromPath(startPath string) (string, error) {
 		currentPath = parentPath
 	}
 
-	// Third pass: Look for make-sync.yaml but verify it's at project level
+	// Third pass: Look for pipeline.yaml but verify it's at project level
 	currentPath = filepath.Clean(startPath)
 	for {
-		// Check for make-sync.yaml (project-specific indicator)
-		if _, err := os.Stat(filepath.Join(currentPath, "make-sync.yaml")); err == nil {
-			// Only accept make-sync.yaml if it's at a level that also has go.mod or main.go
+		// Check for pipeline.yaml (project-specific indicator)
+		if _, err := os.Stat(filepath.Join(currentPath, "pipeline.yaml")); err == nil {
+			// Only accept pipeline.yaml (or legacy make-sync.yaml) if it's at a level that also has go.mod or main.go
 			// This prevents subfolder configs from being treated as project root
 			if _, err := os.Stat(filepath.Join(currentPath, "go.mod")); err == nil {
 				return currentPath, nil
@@ -247,21 +243,19 @@ func GetProjectRootFromCaller() (string, error) {
 	return findProjectRootFromPath(filepath.Dir(filename))
 }
 
-// isValidMakeSyncProject checks if the given path contains make-sync project structure
-func isValidMakeSyncProject(projectPath string) bool {
-	// Check for go.mod with make-sync module
+// isValidPipelineProject checks if the given path contains pipeline project structure
+func isValidPipelineProject(projectPath string) bool {
+	// Check for go.mod containing the module name 'pipeline' or fallback to 'make-sync'
 	goModPath := filepath.Join(projectPath, "go.mod")
 	if content, err := os.ReadFile(goModPath); err == nil {
-		// Check if go.mod contains "module make-sync"
-		if strings.Contains(string(content), "module make-sync") {
+		if strings.Contains(string(content), "module pipeline") || strings.Contains(string(content), "module make-sync") {
 			return true
 		}
 	}
 
-	// Alternative check: look for make-sync specific structure
+	// Alternative check: look for expected structure (agent submodule + main.go)
 	agentPath := filepath.Join(projectPath, "sub_app", "agent")
 	if _, err := os.Stat(agentPath); err == nil {
-		// Also check for main.go in root
 		mainGoPath := filepath.Join(projectPath, "main.go")
 		if _, err := os.Stat(mainGoPath); err == nil {
 			return true
@@ -271,14 +265,14 @@ func isValidMakeSyncProject(projectPath string) bool {
 	return false
 }
 
-// findMakeSyncProjectRoot tries to find make-sync project root using various strategies
-func findMakeSyncProjectRoot() (string, error) {
+// findPipelineProjectRoot tries to find pipeline project root using various strategies
+func findPipelineProjectRoot() (string, error) {
 	// Strategy 1: Check if executable path resolution gives us the answer
 	if exePath, err := os.Executable(); err == nil {
 		if resolved, err := filepath.EvalSymlinks(exePath); err == nil {
 			// Try from executable location upward
 			if root, err := findProjectRootFromPath(filepath.Dir(resolved)); err == nil {
-				if isValidMakeSyncProject(root) {
+				if isValidPipelineProject(root) {
 					return root, nil
 				}
 			}
@@ -288,7 +282,7 @@ func findMakeSyncProjectRoot() (string, error) {
 	// Strategy 2: Look in common locations relative to executable
 	if _, err := os.Executable(); err == nil {
 		// If executable is in /usr/local/bin, /usr/bin, etc.,
-		// make-sync might be installed, check common source locations
+		// pipeline might be installed, check common source locations
 		commonPaths := []string{
 			"/home/donny/workspaces/make-sync",
 			"/mnt/sda/workspaces/make-sync",
@@ -296,7 +290,7 @@ func findMakeSyncProjectRoot() (string, error) {
 		}
 
 		for _, path := range commonPaths {
-			if isValidMakeSyncProject(path) {
+			if isValidPipelineProject(path) {
 				return path, nil
 			}
 		}

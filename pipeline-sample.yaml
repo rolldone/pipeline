@@ -2,10 +2,11 @@ project_name: "my-pipeline-project"
 
 var:
   auth:
-    username: root
+    username: donny
+    password: xxxxxxxx
     privateKey: .ssh/openssh_nopassword
     host: localhost
-    port: "221"
+    port: "22"
     remotePath: /home/ubuntu/workspaces
 
 direct_access:
@@ -16,6 +17,7 @@ direct_access:
       IdentityFile: =var.auth.privateKey
       User: =var.auth.username
       Port: =var.auth.port
+      _Password: =var.auth.password
       RemoteCommand: mkdir -p =var.auth.remotePath && cd =var.auth.remotePath && bash -l
       RequestTty: force
       ServerAliveCountMax: "2"
@@ -30,5 +32,12 @@ direct_access:
       pipeline: "example-pipeline.yaml"
       hosts: []
       var: "var"
+      variables: {}
+    - name: "Agent File Transfer Sample"
+      key: "agent-transfer"
+      pipeline: "agent-file-transfer-sample.yaml"
+      jobs: ["sync-site-agent"]
+      hosts: ["ssh_connection_target"]  # Use the SSH config host name
+      var: "default"
       variables: {}
   

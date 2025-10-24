@@ -654,7 +654,7 @@ func runPipelineInfo() {
 		configPath = configFile
 		cfg, configErr = config.LoadAndRenderConfigWithPath(configFile)
 	} else {
-		configPath = "pipeline.yaml or make-sync.yaml (default)"
+		configPath = "pipeline.yaml (default)"
 		cfg, configErr = config.LoadAndRenderConfigForPipeline()
 	}
 

@@ -92,7 +92,7 @@ func ParseVarsSafe(filePath, key string) (types.Vars, error) {
 
 // LoadExecutions loads executions from config (placeholder for now)
 func LoadExecutions(configPath string) ([]types.Execution, error) {
-	// TODO: Load from make-sync.yaml direct_access.executions
+	// TODO: Load from pipeline.yaml direct_access.executions (legacy: make-sync.yaml)
 	return []types.Execution{}, nil
 }
 

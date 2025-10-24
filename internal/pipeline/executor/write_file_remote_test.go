@@ -30,6 +30,11 @@ func (m *mockSSHClient) UploadBytes(data []byte, remotePath string, perm os.File
 func (m *mockSSHClient) UploadFile(localPath, remotePath string) error   { return nil }
 func (m *mockSSHClient) DownloadFile(localPath, remotePath string) error { return nil }
 func (m *mockSSHClient) RunCommand(cmd string) error                     { return nil }
+func (m *mockSSHClient) RunCommandWithOutput(cmd string) (string, error) { return "", nil }
+func (m *mockSSHClient) SyncFile(localPath, remotePath string) error     { return nil }
+func (m *mockSSHClient) RunCommandWithStream(cmd string, usePty bool) (<-chan string, <-chan error, error) {
+	return nil, nil, nil
+}
 
 func TestRunWriteFileStep_RemoteUploadsUseUploadBytes(t *testing.T) {
 	e := NewExecutor()

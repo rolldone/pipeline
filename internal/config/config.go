@@ -101,7 +101,7 @@ func fixSSHKeyPermissions(keyPath string, dirPerm os.FileMode) error {
 	return nil
 }
 
-const ConfigFileName = "make-sync.yaml"
+const ConfigFileName = "pipeline.yaml"
 
 type Config struct {
 	ResetCache     bool                   `yaml:"reset_cache"`
@@ -255,7 +255,7 @@ func ValidateConfig(cfg *Config) error {
 // LoadAndValidateConfig loads and validates the configuration
 func LoadAndValidateConfig() (*Config, error) {
 	if !ConfigExists() {
-		return nil, errors.New("make-sync.yaml not found. Please run 'make-sync init' first")
+		return nil, errors.New("pipeline.yaml not found. Please run 'pipeline init' first")
 	}
 
 	// Read raw config file
@@ -954,13 +954,37 @@ func LoadAndValidateConfigWithPath(configPath string) (*Config, error) {
 	return &cfg, nil
 }
 
-// LoadAndRenderConfigForPipeline loads config for pipeline tool, preferring pipeline.yaml over make-sync.yaml
+// LoadAndRenderConfigForPipeline loads config for pipeline tool, preferring pipeline.yaml over legacy configs
 func LoadAndRenderConfigForPipeline() (*Config, error) {
 	// Try pipeline.yaml first
 	if _, err := os.Stat("pipeline.yaml"); err == nil {
 		return LoadAndRenderConfigWithPath("pipeline.yaml")
 	}
 
-	// Fall back to make-sync.yaml
+	// Fall back to legacy make-sync.yaml for backward compatibility
 	return LoadAndRenderConfig()
+}
+
+// LocalConfig manages local configuration for agent operations
+type LocalConfig struct {
+	// Add any local config fields here if needed in the future
+}
+
+// GetAgentBinaryName returns a unique binary name for the agent based on target OS
+func (lc *LocalConfig) GetAgentBinaryName(targetOS string) string {
+	switch strings.ToLower(targetOS) {
+	case "windows":
+		return "pipeline-agent.exe"
+	case "linux", "darwin":
+		return "pipeline-agent"
+	default:
+		return "pipeline-agent"
+	}
+}
+
+// GetOrCreateLocalConfig creates or returns the local configuration instance
+func GetOrCreateLocalConfig() (*LocalConfig, error) {
+	// For now, just return a new instance
+	// In the future, this could load from a local config file or cache
+	return &LocalConfig{}, nil
 }

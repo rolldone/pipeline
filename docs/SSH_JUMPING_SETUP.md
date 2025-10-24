@@ -57,7 +57,7 @@ PermitRootLogin no
 ### Scenario 1: Local User Chaining (donny → root@localhost)
 
 ```yaml
-# make-sync.yaml
+# pipeline.yaml
 direct_access:
   ssh_configs:
     - Host: server_donny
@@ -190,7 +190,7 @@ sudo cat /root/.ssh/root_key.pub >> /root/.ssh/authorized_keys
 ```
 
 ### Step 2: Configure SSH Config
-Update `make-sync.yaml` dengan ssh_configs seperti contoh di atas.
+Update `pipeline.yaml` dengan ssh_configs seperti contoh di atas.
 
 ### Step 3: Test Connection
 ```bash
