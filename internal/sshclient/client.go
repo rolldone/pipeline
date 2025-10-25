@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"pipeline/internal/logging"
 	"pipeline/internal/util"
 	"strconv"
 	"strings"
@@ -1026,4 +1027,68 @@ func (c *SSHClient) CreatePTYSession() (*ssh.Session, error) {
 	}
 
 	return session, nil
+}
+
+// ExecWithPTY requests a PTY and starts the command, returning stdin/stdout/stderr
+// streams and a wait function to wait for completion. Caller should call wait()
+// and close stdin when done.
+func (c *SSHClient) ExecWithPTY(cmd string) (io.WriteCloser, io.Reader, io.Reader, func() error, func() error, error) {
+	if c.client == nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("SSH client not connected")
+	}
+
+	session, err := c.client.NewSession()
+	if err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("failed to create session: %v", err)
+	}
+
+	// Request PTY
+	if err := session.RequestPty("xterm", 80, 40, ssh.TerminalModes{}); err != nil {
+		session.Close()
+		return nil, nil, nil, nil, nil, fmt.Errorf("failed to request pty: %v", err)
+	}
+
+	stdin, err := session.StdinPipe()
+	if err != nil {
+		session.Close()
+		return nil, nil, nil, nil, nil, fmt.Errorf("failed to get stdin pipe: %v", err)
+	}
+	stdout, err := session.StdoutPipe()
+	if err != nil {
+		session.Close()
+		return nil, nil, nil, nil, nil, fmt.Errorf("failed to get stdout pipe: %v", err)
+	}
+	stderr, err := session.StderrPipe()
+	if err != nil {
+		session.Close()
+		return nil, nil, nil, nil, nil, fmt.Errorf("failed to get stderr pipe: %v", err)
+	}
+
+	if err := session.Start(cmd); err != nil {
+		session.Close()
+		return nil, nil, nil, nil, nil, fmt.Errorf("failed to start command: %v", err)
+	}
+
+	waitFn := func() error {
+		err := session.Wait()
+		session.Close()
+		return err
+	}
+
+	killFn := func() error {
+		l := logging.WithFields(map[string]interface{}{"event": "sshclient.kill", "host": c.host, "cmd": cmd})
+		l.Info("kill: start", nil)
+		_ = session.Signal(ssh.Signal("TERM"))
+		time.Sleep(200 * time.Millisecond)
+		_ = session.Signal(ssh.Signal("KILL"))
+		err := session.Close()
+		if err != nil {
+			l.Error("kill: result", map[string]interface{}{"result": "error", "error": err.Error()})
+		} else {
+			l.Info("kill: result", map[string]interface{}{"result": "success"})
+		}
+		return err
+	}
+
+	return stdin, stdout, stderr, waitFn, killFn, nil
 }

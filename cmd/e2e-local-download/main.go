@@ -1,15 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 
+	"pipeline/internal/logging"
+
 	_ "modernc.org/sqlite"
 
 	"github.com/cespare/xxhash/v2"
+	"github.com/creack/pty"
 
 	"pipeline/internal/pipeline/executor"
 	"pipeline/internal/pipeline/types"
@@ -58,6 +62,55 @@ func (l *LocalSSHClient) RunCommandWithStream(cmd string, usePty bool) (<-chan s
 	close(outc)
 	close(errc)
 	return outc, errc, nil
+}
+
+// ExecWithPTY implements the executor.SSHClient interface but is not supported
+// for the LocalSSHClient (used only for file-copy tests). It returns an error
+// to indicate PTY/execution is unsupported in this local client.
+func (l *LocalSSHClient) ExecWithPTY(cmd string) (io.WriteCloser, io.Reader, io.Reader, func() error, func() error, error) {
+	// Run the command in a local pty so callers that expect a PTY-backed
+	// session (interactive prompts, etc.) can operate against this client.
+	// We use `sh -lc` so the command string is interpreted by the shell.
+	c := newCommandForPTY(cmd)
+
+	ptmx, err := pty.Start(c)
+	if err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("failed to start pty: %w", err)
+	}
+
+	// For a PTY the stdout and stderr are combined into the pty master.
+	// We return the same pty for stdout and a drained reader for stderr to
+	// satisfy the interface. Callers should use the PTY stdout for prompts.
+	stdout := ptmx
+	stderr := bytes.NewReader(nil)
+
+	waitFn := func() error {
+		// Closing the master triggers the child to receive SIGHUP on many
+		// systems; ensure we close it after waiting.
+		err := c.Wait()
+		_ = ptmx.Close()
+		return err
+	}
+
+	killFn := func() error {
+		l := logging.WithFields(map[string]interface{}{"event": "localpty.kill", "cmd": cmd, "pid": func() int {
+			if c.Process != nil {
+				return c.Process.Pid
+			}
+			return 0
+		}()})
+		l.Info("local pty kill requested", nil)
+		// Best-effort: kill the whole process group on POSIX, fallback to
+		// single-process kill on platforms that don't support groups.
+		if c.Process != nil {
+			_ = killProcessGroup(c.Process.Pid)
+		}
+		_ = ptmx.Close()
+		l.Info("local pty kill done", nil)
+		return nil
+	}
+
+	return ptmx, stdout, stderr, waitFn, killFn, nil
 }
 
 func computeXXHashHex(path string) (string, error) {

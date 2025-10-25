@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -34,6 +35,12 @@ func (m *mockSSHClient) RunCommandWithOutput(cmd string) (string, error) { retur
 func (m *mockSSHClient) SyncFile(localPath, remotePath string) error     { return nil }
 func (m *mockSSHClient) RunCommandWithStream(cmd string, usePty bool) (<-chan string, <-chan error, error) {
 	return nil, nil, nil
+}
+
+// ExecWithPTY is a minimal stub so tests that use the SSHClient interface
+// still compile. Tests that need PTY behavior implement their own mocks.
+func (m *mockSSHClient) ExecWithPTY(cmd string) (io.WriteCloser, io.Reader, io.Reader, func() error, func() error, error) {
+	return nil, nil, nil, func() error { return nil }, func() error { return nil }, nil
 }
 
 func TestRunWriteFileStep_RemoteUploadsUseUploadBytes(t *testing.T) {
