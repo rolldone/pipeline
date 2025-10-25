@@ -600,18 +600,41 @@ func (e *Executor) runStep(step *types.Step, job *types.Job, config map[string]i
 		e.debugMode = prevDebug
 	}()
 
+	// Build effective vars for this step. Precedence (low->high):
+	// 1) pipeline.Variables (pipeline defaults)
+	// 2) pipeline.ContextVariables (runtime saved outputs)
+	// 3) vars parameter (execution/host/explicit vars)
+	// This ensures that values saved during earlier steps (in ContextVariables)
+	// are available for interpolation in later steps.
+	effectiveVars := types.Vars{}
+	if e.pipeline != nil && e.pipeline.Variables != nil {
+		for k, v := range e.pipeline.Variables {
+			effectiveVars[k] = v
+		}
+	}
+	if e.pipeline != nil && e.pipeline.ContextVariables != nil {
+		for k, v := range e.pipeline.ContextVariables {
+			effectiveVars[k] = v
+		}
+	}
+	if vars != nil {
+		for k, v := range vars {
+			effectiveVars[k] = v
+		}
+	}
+
 	switch step.Type {
 	case "file_transfer":
-		err := e.runFileTransferStep(step, job, config, vars)
+		err := e.runFileTransferStep(step, job, config, effectiveVars)
 		return "", "", err
 	case "script":
-		err := e.runScriptStep(step, job, config, vars)
+		err := e.runScriptStep(step, job, config, effectiveVars)
 		return "", "", err
 	case "write_file":
-		err := e.runWriteFileStep(step, job, config, vars)
+		err := e.runWriteFileStep(step, job, config, effectiveVars)
 		return "", "", err
 	default: // "command" or empty
-		return e.runCommandStep(step, job, config, vars)
+		return e.runCommandStep(step, job, config, effectiveVars)
 	}
 }
 
