@@ -9,6 +9,7 @@ type Execution struct {
 	Var       string                 `yaml:"var"`                 // Reference to vars.yaml key (existing system)
 	Variables map[string]interface{} `yaml:"variables,omitempty"` // Direct variables definition (new feature)
 	Hosts     []string               `yaml:"hosts"`
+	Debug     *bool                  `yaml:"debug,omitempty"` // optional: enable debug logging for this execution
 }
 
 // Pipeline represents a pipeline configuration
@@ -30,6 +31,7 @@ type Job struct {
 	Mode      string   `yaml:"mode,omitempty"` // "local" or "remote" (default: "remote")
 	Steps     []Step   `yaml:"steps"`
 	LogOutput *bool    `yaml:"log_output,omitempty"` // optional: enable logging for this job
+	Debug     *bool    `yaml:"debug,omitempty"`      // optional: enable debug logging for this job (overrides step-level)
 }
 
 // Step represents a step within a job
@@ -71,6 +73,7 @@ type Step struct {
 	ElseStep     string `yaml:"else_step,omitempty"`   // target step name for else goto_step
 	ElseJob      string `yaml:"else_job,omitempty"`    // target job name for else goto_job
 	LogOutput    *bool  `yaml:"log_output,omitempty"`  // optional: enable logging for this step
+	Debug        *bool  `yaml:"debug,omitempty"`       // optional: enable debug logging for this step
 }
 
 // FileEntry represents a per-file transfer instruction inside a file_transfer step

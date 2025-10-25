@@ -595,6 +595,61 @@ Invalid executions are rejected with clear error messages:
 ❌ Vars key 'missing-env' not found in vars.yaml
 ```
 
+## Debugging
+
+Pipeline supports a small debug facility that you can enable at multiple scopes. The effective debug setting for a running step follows this precedence (highest → lowest):
+
+- CLI / Execution: `--debug` or `execution.debug` (highest)
+- Job-level: `job.debug`
+- Step-level: `step.debug`
+
+Notes:
+- If you pass `--debug` on the CLI or set `execution.debug: true` in your execution entry, debug is enabled globally and job/step cannot disable it.
+- `job.debug` overrides `step.debug` for all steps in that job.
+- The executor toggles debug mode for each step execution so existing debug prints (guarded by the executor's debug flag) follow the effective per-step value.
+
+Examples:
+
+Enable globally via execution YAML:
+
+```yaml
+executions:
+  - name: "Dev run"
+    key: "dev"
+    pipeline: "my-pipeline.yaml"
+    hosts: ["localhost"]
+    debug: true  # enable debug for the entire execution (CLI has same effect)
+```
+
+Enable per-job (overrides step-level):
+
+```yaml
+jobs:
+  - name: "build"
+    debug: true
+    steps:
+      - name: "compile"
+        commands: ["make all"]
+        debug: false  # ignored because job.debug true
+```
+
+Enable single step only:
+
+```yaml
+steps:
+  - name: "special-step"
+    debug: true
+    commands: ["./diagnose.sh"]
+```
+
+CLI usage (overrides job/step):
+
+```bash
+pipeline run dev --debug
+```
+
+Use this to get extra diagnostic output (the executor prints debug messages only when enabled).
+
 ## Step Configuration
 
 Each step in a pipeline supports advanced configuration for detailed execution control:
@@ -649,6 +704,35 @@ steps:
 | `expect` | []Expect | - | Interactive prompt responses |
 
 ### Command Format Support
+
+### Expect (interactive prompts)
+
+Pipeline supports handling interactive prompts via the `expect` array on a step. Each entry contains:
+
+- `prompt`: a regular expression (Go RE2) to match against stdout/stderr
+- `response`: the bytes to write to stdin when the prompt matches (include `\n` to send Enter)
+
+Notes:
+- Prompts are compiled with Go's RE2 engine (`regexp.Compile`). RE2 is fast and safe but does not support some PCRE features (lookaround).
+- The executor supports prompt matches that span multiple reads (prompts split across chunks).
+- If your response should include an Enter, append `\n` (for example: `"yes\n"`).
+
+Example:
+
+```yaml
+steps:
+  - name: "confirm-deploy"
+    type: "command"
+    commands: ["./deploy.sh"]
+    expect:
+      - prompt: "Are you sure\\?"   # regex (escape ?)
+        response: "yes\n"
+```
+
+Edge cases:
+- Avoid PCRE-only constructs (lookahead/lookbehind) — rewrite using RE2-compatible patterns.
+- If an invalid regex is provided the executor will surface an error when starting the step.
+
 
 Pipeline supports two command formats for backward compatibility:
 

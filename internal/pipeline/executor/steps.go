@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"pipeline/internal/pipeline/types"
-	"pipeline/internal/sshclient"
 	"pipeline/internal/util"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -254,10 +253,9 @@ func (e *Executor) runCommandStep(step *types.Step, job *types.Job, config map[s
 	}
 	defer client.Close()
 
-	// runCommandInteractive requires the concrete *sshclient.SSHClient. Attempt
-	// a type assertion; if it fails we can't run interactive commands.
-	concreteClient, ok := client.(*sshclient.SSHClient)
-	if !ok {
+	// runCommandInteractive requires an SSHClient that supports PTY execution.
+	// The factory returns an SSHClient interface; ensure it's non-nil.
+	if client == nil {
 		return "", "", fmt.Errorf("ssh client does not support interactive commands")
 	}
 
@@ -270,17 +268,11 @@ func (e *Executor) runCommandStep(step *types.Step, job *types.Job, config map[s
 		}
 	}
 
-	// Determine timeout (default 0 = unlimited if not specified)
+	// Determine timeouts. A value of 0 means unlimited for that timer.
+	// We do NOT coerce to legacy defaults here so callers and step authors
+	// can explicitly request unlimited behavior by setting 0.
 	timeout := step.Timeout
-	if timeout == 0 && step.IdleTimeout == 0 {
-		timeout = 100 // Legacy default only if no idle timeout
-	}
-
-	// Determine idle timeout (default 600 seconds = 10 minutes)
 	idleTimeout := step.IdleTimeout
-	if idleTimeout == 0 {
-		idleTimeout = 600
-	}
 
 	var lastOutput string
 	for _, cmd := range commands {
@@ -293,7 +285,7 @@ func (e *Executor) runCommandStep(step *types.Step, job *types.Job, config map[s
 		fmt.Printf("Running on %s: %s\n", host, fullCmd)
 
 		// Run command with interactive support and timeout
-		output, err := e.runCommandInteractive(concreteClient, fullCmd, step.Expect, vars, timeout, idleTimeout, step.Silent, step, job)
+		output, err := e.runCommandInteractive(client, fullCmd, step.Expect, vars, timeout, idleTimeout, step.Silent, step, job)
 		if err != nil {
 			// flush evidence into pipeline log before returning
 			e.flushErrorEvidenceAll()

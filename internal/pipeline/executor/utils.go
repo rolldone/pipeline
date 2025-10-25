@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -11,18 +12,21 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
+
+	"strconv"
 
 	"github.com/cespare/xxhash/v2"
 
 	gitignore "github.com/sabhiram/go-gitignore"
 
 	"pipeline/internal/config"
+	"pipeline/internal/logging"
 	"pipeline/internal/pipeline/types"
 )
 
-// interpolateString performs variable interpolation in strings
 func (e *Executor) interpolateString(template string, vars types.Vars) string {
 	if template == "" {
 		return template
@@ -53,6 +57,113 @@ func (e *Executor) interpolateString(template string, vars types.Vars) string {
 	}
 
 	return result
+}
+
+// expandResponse replaces ${n} placeholders in response templates using
+// capture groups from regex matches. groups[0] is the full match, groups[1]
+// is the first capture group, etc.
+func expandResponse(tmpl string, groups []string) string {
+	if tmpl == "" {
+		return ""
+	}
+	// pattern to find ${N}
+	repl := regexp.MustCompile(`\$\{(\d+)\}`)
+	return repl.ReplaceAllStringFunc(tmpl, func(m string) string {
+		sub := repl.FindStringSubmatch(m)
+		if len(sub) < 2 {
+			return m
+		}
+		idx, err := strconv.Atoi(sub[1])
+		if err != nil {
+			return ""
+		}
+		if idx < 0 || idx >= len(groups) {
+			return ""
+		}
+		return groups[idx]
+	})
+}
+
+// invokeKillLogger logs and invokes a kill function with contextual metadata.
+func (e *Executor) invokeKillLogger(killFn func() error, reason, cmd string, step *types.Step, job *types.Job) {
+	if killFn == nil {
+		return
+	}
+	stepName := ""
+	jobName := ""
+	if step != nil {
+		stepName = step.Name
+	}
+	if job != nil {
+		jobName = job.Name
+	}
+	l := logging.WithFields(map[string]interface{}{"event": "executor.kill", "reason": reason, "job": jobName, "step": stepName, "cmd": cmd})
+	l.Info("kill: start", nil)
+	if err := killFn(); err != nil {
+		l.Error("kill: result", map[string]interface{}{"result": "error", "error": err.Error()})
+	} else {
+		l.Info("kill: result", map[string]interface{}{"result": "success"})
+	}
+}
+
+// processExpectBuffer looks for the earliest regex match among compiled expects
+// within the buffer. If a match is found it expands the response using
+// capture groups, writes it to stdin, and consumes the buffer up to the end
+// of the match. Returns true if a match was processed.
+func processExpectBuffer(b *bytes.Buffer, compiled []struct {
+	re   *regexp.Regexp
+	resp string
+}, stdin io.WriteCloser) bool {
+	if b.Len() == 0 || len(compiled) == 0 {
+		return false
+	}
+	data := b.String()
+	earliestStart := -1
+	earliestEnd := -1
+	chosen := -1
+	var chosenMatches []string
+	for i, ce := range compiled {
+		if ce.re == nil {
+			continue
+		}
+		if loc := ce.re.FindStringIndex(data); loc != nil {
+			start := loc[0]
+			end := loc[1]
+			if earliestStart == -1 || start < earliestStart {
+				// store matches for replacement
+				matches := ce.re.FindStringSubmatch(data)
+				earliestStart = start
+				earliestEnd = end
+				chosen = i
+				chosenMatches = matches
+			}
+		}
+	}
+	if chosen == -1 {
+		// no match
+		// keep buffer capped to last 16KB to avoid unbounded growth
+		const maxBuf = 16 * 1024
+		if b.Len() > maxBuf {
+			// trim front
+			d := b.Bytes()
+			tail := d[b.Len()-maxBuf:]
+			b.Reset()
+			b.Write(tail)
+		}
+		return false
+	}
+
+	// expand response and write to stdin
+	resp := expandResponse(compiled[chosen].resp, chosenMatches)
+	if stdin != nil {
+		io.WriteString(stdin, resp+"\n")
+	}
+
+	// consume buffer up to earliestEnd
+	remainder := data[earliestEnd:]
+	b.Reset()
+	b.WriteString(remainder)
+	return true
 }
 
 // matchesIncludeExclude checks if a path matches include/exclude patterns
@@ -489,20 +600,455 @@ func (e *Executor) getStepCommands(step *types.Step, vars types.Vars) []string {
 
 // runCommandStepLocal runs a command step in local mode
 func (e *Executor) runCommandStepLocal(step *types.Step, commands []string, vars types.Vars) (string, string, error) {
-	// Basic implementation - run commands locally
-	for _, cmd := range commands {
-		fmt.Printf("Running locally: %s\n", cmd)
-		// TODO: Implement actual command execution
+	// Execute each command locally using the shell with streaming output and
+	// optional "expect" style prompt/response handling.
+	workingDir := e.interpolateString(step.WorkingDir, vars)
+	if workingDir == "" {
+		if wd, ok := vars["working_dir"].(string); ok {
+			workingDir = wd
+		}
 	}
+
+	// Determine overall timeout and idle timeout. A value of 0 means
+	// unlimited for that timer. We intentionally do not apply a legacy
+	// default here so callers that expect '0' to mean unlimited are
+	// respected.
+	overallTimeout := step.Timeout
+	idleTimeout := step.IdleTimeout
+
+	var combinedOut bytes.Buffer
+
+	for _, c := range commands {
+		fullCmd := c
+		if workingDir != "" {
+			fullCmd = fmt.Sprintf("cd %s && %s", workingDir, c)
+		}
+
+		fmt.Printf("Running locally: %s\n", fullCmd)
+
+		// compile Expect regexes once per step (fail fast on invalid regex)
+		type compiledExpect struct {
+			re   *regexp.Regexp
+			resp string
+		}
+		var compiled []compiledExpect
+		for _, ex := range step.Expect {
+			if ex.Prompt == "" {
+				continue
+			}
+			r, err := regexp.Compile(ex.Prompt)
+			if err != nil {
+				return "", "", fmt.Errorf("invalid expect regex %q: %v", ex.Prompt, err)
+			}
+			compiled = append(compiled, compiledExpect{re: r, resp: ex.Response})
+		}
+
+		// Create command using ExecCommand (testable injection point)
+		cmd := e.ExecCommand("/bin/sh", "-lc", fullCmd)
+
+		stdin, _ := cmd.StdinPipe()
+		stdout, _ := cmd.StdoutPipe()
+		stderr, _ := cmd.StderrPipe()
+
+		if err := cmd.Start(); err != nil {
+			e.flushErrorEvidenceAll()
+			return "", "", fmt.Errorf("failed to start command: %v", err)
+		}
+
+		// If there are no expect handlers for this step, close stdin so the
+		// shell/command sees EOF and cannot wait for input indefinitely.
+		if stdin != nil && len(compiled) == 0 {
+			// best effort close
+			_ = stdin.Close()
+		}
+
+		// trackers and synchronization
+		var wg sync.WaitGroup
+		doneCh := make(chan struct{})
+		lastOutputAt := time.Now()
+
+		pushOutput := func(s string) {
+			// append to ring buffer for global history
+			e.historyMu.Lock()
+			if e.outputHistory == nil {
+				e.outputHistory = NewRingBuffer(307200)
+			}
+			e.outputHistory.Add(s)
+			e.historyMu.Unlock()
+
+			// also write to combined buffer
+			combinedOut.WriteString(s)
+			// print to stdout unless silent
+			if !step.Silent {
+				fmt.Print(s)
+			}
+		}
+
+		// stdout reader (chunked) - supports prompts that may be split across reads
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			buf := make([]byte, 4096)
+			streamBuf := bytes.NewBuffer(nil)
+			for {
+				n, rerr := stdout.Read(buf)
+				if n > 0 {
+					chunk := string(buf[:n])
+					lastOutputAt = time.Now()
+					pushOutput(chunk)
+					// append to stream buffer and try to process expects
+					streamBuf.Write(buf[:n])
+					// build compiled list once (reuse same struct shape)
+					var comp []struct {
+						re   *regexp.Regexp
+						resp string
+					}
+					for _, ce := range compiled {
+						comp = append(comp, struct {
+							re   *regexp.Regexp
+							resp string
+						}{re: ce.re, resp: ce.resp})
+					}
+					// process as many matches as present
+					for processExpectBuffer(streamBuf, comp, stdin) {
+					}
+				}
+				if rerr != nil {
+					if rerr != io.EOF {
+						pushOutput(fmt.Sprintf("[error reading stdout]: %v\n", rerr))
+					}
+					return
+				}
+			}
+		}()
+
+		// stderr reader (chunked)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			buf := make([]byte, 4096)
+			streamBuf := bytes.NewBuffer(nil)
+			for {
+				n, rerr := stderr.Read(buf)
+				if n > 0 {
+					chunk := string(buf[:n])
+					lastOutputAt = time.Now()
+					pushOutput(chunk)
+					streamBuf.Write(buf[:n])
+					var comp []struct {
+						re   *regexp.Regexp
+						resp string
+					}
+					for _, ce := range compiled {
+						comp = append(comp, struct {
+							re   *regexp.Regexp
+							resp string
+						}{re: ce.re, resp: ce.resp})
+					}
+					for processExpectBuffer(streamBuf, comp, stdin) {
+					}
+				}
+				if rerr != nil {
+					if rerr != io.EOF {
+						pushOutput(fmt.Sprintf("[error reading stderr]: %v\n", rerr))
+					}
+					return
+				}
+			}
+		}()
+
+		// timeout/idle watchers
+		var overallTimer *time.Timer
+		var idleTimer *time.Timer
+		if overallTimeout > 0 {
+			overallTimer = time.NewTimer(time.Duration(overallTimeout) * time.Second)
+		}
+		if idleTimeout > 0 {
+			idleTimer = time.NewTimer(time.Duration(idleTimeout) * time.Second)
+		}
+
+		// monitor goroutine (not part of readers waitgroup). It watches
+		// timers and will kill the process on timeout. It listens on
+		// doneCh to know when readers have finished and it should exit.
+		go func() {
+			for {
+				select {
+				case <-doneCh:
+					return
+				default:
+				}
+				// check timers
+				if overallTimer != nil {
+					select {
+					case <-overallTimer.C:
+						pushOutput("[error]: overall timeout reached\n")
+						// best-effort kill
+						_ = cmd.Process.Kill()
+						return
+					default:
+					}
+				}
+				if idleTimer != nil {
+					if time.Since(lastOutputAt) > time.Duration(idleTimeout)*time.Second {
+						pushOutput("[error]: idle timeout reached\n")
+						_ = cmd.Process.Kill()
+						return
+					}
+				}
+				time.Sleep(200 * time.Millisecond)
+			}
+		}()
+
+		// wait for readers to finish, then signal monitor to stop
+		wg.Wait()
+		close(doneCh)
+
+		// ensure process exit
+		if err := cmd.Wait(); err != nil {
+			e.flushErrorEvidenceAll()
+			outStr := combinedOut.String()
+			if step.SaveOutput != "" && e.pipeline != nil {
+				e.saveStepOutput(step.SaveOutput, strings.TrimSpace(outStr))
+			}
+			// check conditions
+			action, target, cerr := e.checkConditions(step, outStr, vars)
+			if cerr != nil {
+				return "", "", cerr
+			}
+			if action != "" {
+				return action, target, nil
+			}
+			return "", "", fmt.Errorf("command failed: %v", err)
+		}
+
+		// normal completion
+		outStr := combinedOut.String()
+		if step.SaveOutput != "" && e.pipeline != nil {
+			e.saveStepOutput(step.SaveOutput, strings.TrimSpace(outStr))
+		}
+
+		// check conditions
+		action, target, cerr := e.checkConditions(step, outStr, vars)
+		if cerr != nil {
+			return "", "", cerr
+		}
+		if action != "" {
+			return action, target, nil
+		}
+	}
+
 	return "", "", nil
 }
 
 // runCommandInteractive runs a command interactively via SSH
 func (e *Executor) runCommandInteractive(client interface{}, cmd string, expect []types.Expect, vars types.Vars, timeout, idleTimeout int, silent bool, step *types.Step, job *types.Job) (string, error) {
-	// Basic implementation - placeholder
 	fmt.Printf("Running interactively: %s\n", cmd)
-	// TODO: Implement actual interactive command execution
-	return "", nil
+
+	// If client implements SSHClient interface, try ExecWithPTY which provides
+	// stdin/stdout/stderr and a wait function. This avoids concrete type
+	// assertions and makes the code testable with mocks.
+	if c, ok := client.(SSHClient); ok && c != nil {
+		stdin, stdout, stderr, waitFn, killFn, err := c.ExecWithPTY(cmd)
+		if err != nil {
+			return "", fmt.Errorf("failed to start remote PTY command: %v", err)
+		}
+
+		// compile expect regexes for remote handling
+		type compiledExpect struct {
+			re   *regexp.Regexp
+			resp string
+		}
+		var compiled []compiledExpect
+		for _, ex := range step.Expect {
+			if ex.Prompt == "" {
+				continue
+			}
+			r, err := regexp.Compile(ex.Prompt)
+			if err != nil {
+				// best effort: kill session if possible then return, but log the attempt
+				if killFn != nil {
+					e.invokeKillLogger(killFn, "invalid-expect", cmd, step, job)
+				} else if stdin != nil {
+					stdin.Close()
+				}
+				return "", fmt.Errorf("invalid expect regex %q: %v", ex.Prompt, err)
+			}
+			compiled = append(compiled, compiledExpect{re: r, resp: ex.Response})
+		}
+
+		var outBuf bytes.Buffer
+		lastOutputAt := time.Now()
+		done := make(chan struct{})
+
+		// helper to push output
+		pushOut := func(s string) {
+			lastOutputAt = time.Now()
+			outBuf.WriteString(s)
+			if !silent {
+				fmt.Print(s)
+			}
+		}
+
+		// stdout reader
+		go func() {
+			buf := make([]byte, 4096)
+			streamBuf := bytes.NewBuffer(nil)
+			for {
+				n, rerr := stdout.Read(buf)
+				if n > 0 {
+					s := string(buf[:n])
+					pushOut(s)
+					streamBuf.Write(buf[:n])
+					var comp []struct {
+						re   *regexp.Regexp
+						resp string
+					}
+					for _, ce := range compiled {
+						comp = append(comp, struct {
+							re   *regexp.Regexp
+							resp string
+						}{re: ce.re, resp: ce.resp})
+					}
+					for processExpectBuffer(streamBuf, comp, stdin) {
+					}
+				}
+				if rerr != nil {
+					if rerr != io.EOF {
+						pushOut(fmt.Sprintf("[stdout err]: %v\n", rerr))
+					}
+					return
+				}
+			}
+		}()
+
+		// stderr reader
+		go func() {
+			buf := make([]byte, 4096)
+			streamBuf := bytes.NewBuffer(nil)
+			for {
+				n, rerr := stderr.Read(buf)
+				if n > 0 {
+					s := string(buf[:n])
+					pushOut(s)
+					streamBuf.Write(buf[:n])
+					var comp []struct {
+						re   *regexp.Regexp
+						resp string
+					}
+					for _, ce := range compiled {
+						comp = append(comp, struct {
+							re   *regexp.Regexp
+							resp string
+						}{re: ce.re, resp: ce.resp})
+					}
+					for processExpectBuffer(streamBuf, comp, stdin) {
+					}
+				}
+				if rerr != nil {
+					if rerr != io.EOF {
+						pushOut(fmt.Sprintf("[stderr err]: %v\n", rerr))
+					}
+					return
+				}
+			}
+		}()
+
+		// monitor timeouts
+		// A timeout value of 0 means unlimited; do not coerce to a legacy
+		// default here.
+		var overallTimer *time.Timer
+		if timeout > 0 {
+			overallTimer = time.NewTimer(time.Duration(timeout) * time.Second)
+		}
+
+		go func() {
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				if overallTimer != nil {
+					select {
+					case <-overallTimer.C:
+						pushOut("[error]: overall timeout reached\n")
+						// best-effort: kill the session if available (log the attempt)
+						if killFn != nil {
+							e.invokeKillLogger(killFn, "overall-timeout", cmd, step, job)
+						} else if stdin != nil {
+							stdin.Close()
+						}
+						return
+					default:
+					}
+				}
+				if idleTimeout > 0 {
+					if time.Since(lastOutputAt) > time.Duration(idleTimeout)*time.Second {
+						pushOut("[error]: idle timeout reached\n")
+						if killFn != nil {
+							e.invokeKillLogger(killFn, "idle-timeout", cmd, step, job)
+						} else if stdin != nil {
+							stdin.Close()
+						}
+						return
+					}
+				}
+				time.Sleep(200 * time.Millisecond)
+			}
+		}()
+
+		// wait for command to finish
+		if err := waitFn(); err != nil {
+			close(done)
+			outStr := outBuf.String()
+			if step.SaveOutput != "" && e.pipeline != nil {
+				e.saveStepOutput(step.SaveOutput, strings.TrimSpace(outStr))
+			}
+			return outStr, fmt.Errorf("remote command failed: %v", err)
+		}
+
+		close(done)
+		outStr := outBuf.String()
+		if step.SaveOutput != "" && e.pipeline != nil {
+			e.saveStepOutput(step.SaveOutput, strings.TrimSpace(outStr))
+		}
+		return outStr, nil
+	}
+
+	// Fallback: if client implements RunCommandWithStream, use that (no stdin)
+	if c2, ok := client.(SSHClient); ok {
+		outCh, errCh, err := c2.RunCommandWithStream(cmd, true)
+		if err != nil {
+			return "", fmt.Errorf("failed to start remote streaming command: %v", err)
+		}
+		var outBuf bytes.Buffer
+		for {
+			select {
+			case s, ok := <-outCh:
+				if !ok {
+					outStr := outBuf.String()
+					if step.SaveOutput != "" && e.pipeline != nil {
+						e.saveStepOutput(step.SaveOutput, strings.TrimSpace(outStr))
+					}
+					return outStr, nil
+				}
+				outBuf.WriteString(s)
+				if !silent {
+					fmt.Print(s)
+				}
+			case eerr, ok := <-errCh:
+				if ok && eerr != nil {
+					outStr := outBuf.String()
+					if step.SaveOutput != "" && e.pipeline != nil {
+						e.saveStepOutput(step.SaveOutput, strings.TrimSpace(outStr))
+					}
+					return outStr, fmt.Errorf("remote command error: %v", eerr)
+				}
+			}
+		}
+	}
+
+	return "", fmt.Errorf("ssh client does not support interactive execution")
 }
 
 // runLocalFileTransfer handles local file transfer operations

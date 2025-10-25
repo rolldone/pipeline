@@ -3,6 +3,7 @@ package executor
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,6 +37,8 @@ type Executor struct {
 	// it uses sshclient.NewPersistentSSHClient and returns a concrete client
 	// that satisfies the SSHClient interface below.
 	NewSSHClient func(username, privateKeyPath, password, passphrase, host, port, proxyJump string) (SSHClient, error)
+	// debugMode enables verbose debug prints for interactive diagnostics
+	debugMode bool
 }
 
 // NewExecutor creates a new executor
@@ -45,6 +48,16 @@ func NewExecutor() *Executor {
 		executedAsSubroutine: make(map[string]bool),
 		WriteFileFunc:        os.WriteFile,
 		ExecCommand:          exec.Command,
+	}
+}
+
+// debugf prints debug messages when debugMode is enabled
+func (e *Executor) debugf(format string, args ...interface{}) {
+	if e == nil {
+		return
+	}
+	if e.debugMode {
+		fmt.Printf(format+"\n", args...)
 	}
 }
 
@@ -70,6 +83,10 @@ type SSHClient interface {
 	RunCommandWithOutput(cmd string) (string, error)
 	SyncFile(localPath, remotePath string) error
 	RunCommandWithStream(cmd string, usePty bool) (<-chan string, <-chan error, error)
+	// ExecWithPTY executes a command on remote and requests a PTY. It returns
+	// stdin (writable), stdout/stderr readers, a wait function to await
+	// command completion, and an error if starting the command failed.
+	ExecWithPTY(cmd string) (io.WriteCloser, io.Reader, io.Reader, func() error, func() error, error)
 }
 
 // writeLog writes a message to the log file (lazy initialization)
@@ -264,6 +281,13 @@ func (e *Executor) Execute(pipeline *types.Pipeline, execution *types.Execution,
 
 	// Initialize subroutine tracking
 	e.executedAsSubroutine = make(map[string]bool)
+
+	// Set debug mode based on execution setting (execution.Debug can be set by CLI or pipeline config)
+	if execution.Debug != nil && *execution.Debug {
+		e.debugMode = true
+	} else {
+		e.debugMode = false
+	}
 
 	// Resolve SSH configs for hosts
 	sshConfigs, err := e.resolveSSHConfigs(hosts, cfg)
@@ -559,6 +583,23 @@ func (e *Executor) runJobFromStep(job *types.Job, jobName string, startStepIdx i
 
 // runStep runs a step on a host
 func (e *Executor) runStep(step *types.Step, job *types.Job, config map[string]interface{}, vars types.Vars) (string, string, error) {
+	// Determine effective debug for this step using precedence:
+	// CLI/Execution (e.debugMode already set in Execute) > Job.Debug > Step.Debug
+	prevDebug := e.debugMode
+	if !prevDebug {
+		if job != nil && job.Debug != nil {
+			e.debugMode = *job.Debug
+		} else if step != nil && step.Debug != nil {
+			e.debugMode = *step.Debug
+		} else {
+			e.debugMode = false
+		}
+	}
+	// Restore previous debug mode after step completes
+	defer func() {
+		e.debugMode = prevDebug
+	}()
+
 	switch step.Type {
 	case "file_transfer":
 		err := e.runFileTransferStep(step, job, config, vars)

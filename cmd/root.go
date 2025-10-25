@@ -48,6 +48,7 @@ func Execute() error {
 // newPipelineRunCmd creates the pipeline run subcommand
 func newPipelineRunCmd() *cobra.Command {
 	var varOverrides map[string]string
+	var runDebug bool
 
 	cmd := &cobra.Command{
 		Use:   "run [execution_key]",
@@ -198,6 +199,12 @@ func newPipelineRunCmd() *cobra.Command {
 				vars[k] = v
 			}
 
+			// If CLI debug flag provided, propagate into execution
+			if runDebug {
+				b := true
+				execution.Debug = &b
+			}
+
 			// Execute
 			executor := executor.NewExecutor()
 			if err := executor.Execute(pipeline, execution, vars, execution.Hosts, cfg); err != nil {
@@ -210,6 +217,7 @@ func newPipelineRunCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringToStringVar(&varOverrides, "var", nil, "Override variables (key=value)")
+	cmd.Flags().BoolVar(&runDebug, "debug", false, "Enable debug logging for this run (overrides execution-level setting)")
 
 	return cmd
 }
