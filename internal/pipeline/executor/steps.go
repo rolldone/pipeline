@@ -282,7 +282,17 @@ func (e *Executor) runCommandStep(step *types.Step, job *types.Job, config map[s
 			fullCmd = fmt.Sprintf("cd %s && %s", workingDir, cmd)
 		}
 
-		fmt.Printf("Running on %s: %s\n", host, fullCmd)
+		// Respect step.Silent: avoid echoing the full command when the step is silent
+		if !step.Silent {
+			preview := fullCmd
+			if idx := strings.IndexByte(preview, '\n'); idx != -1 {
+				preview = preview[:idx]
+			}
+			if len(preview) > 200 {
+				preview = preview[:200] + "..."
+			}
+			fmt.Printf("Running on %s: %s\n", host, preview)
+		}
 
 		// Run command with interactive support and timeout
 		output, err := e.runCommandInteractive(client, fullCmd, step.Expect, vars, timeout, idleTimeout, step.Silent, step, job)

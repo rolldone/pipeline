@@ -624,7 +624,20 @@ func (e *Executor) runCommandStepLocal(step *types.Step, commands []string, vars
 			fullCmd = fmt.Sprintf("cd %s && %s", workingDir, c)
 		}
 
-		fmt.Printf("Running locally: %s\n", fullCmd)
+		// Respect step.Silent: when true avoid printing the full command line
+		if !step.Silent {
+			// If command is multiline or very long, show a truncated preview to
+			// avoid dumping huge saved outputs into the console when variables
+			// contain large text. Show first 200 chars or up to first newline.
+			preview := fullCmd
+			if idx := strings.IndexByte(preview, '\n'); idx != -1 {
+				preview = preview[:idx]
+			}
+			if len(preview) > 200 {
+				preview = preview[:200] + "..."
+			}
+			fmt.Printf("Running locally: %s\n", preview)
+		}
 
 		// compile Expect regexes once per step (fail fast on invalid regex)
 		type compiledExpect struct {
@@ -842,7 +855,18 @@ func (e *Executor) runCommandStepLocal(step *types.Step, commands []string, vars
 
 // runCommandInteractive runs a command interactively via SSH
 func (e *Executor) runCommandInteractive(client interface{}, cmd string, expect []types.Expect, vars types.Vars, timeout, idleTimeout int, silent bool, step *types.Step, job *types.Job) (string, error) {
-	fmt.Printf("Running interactively: %s\n", cmd)
+	// Respect silent flag: only print interactive header when not silent
+	if !silent {
+		// Truncate preview to avoid printing huge multiline commands
+		preview := cmd
+		if idx := strings.IndexByte(preview, '\n'); idx != -1 {
+			preview = preview[:idx]
+		}
+		if len(preview) > 200 {
+			preview = preview[:200] + "..."
+		}
+		fmt.Printf("Running interactively: %s\n", preview)
+	}
 
 	// If client implements SSHClient interface, try ExecWithPTY which provides
 	// stdin/stdout/stderr and a wait function. This avoids concrete type
