@@ -1,0 +1,22 @@
+# Ignore local sync temp files and generated artifacts
+.sync_temp/
+
+# Credentials and sensitive data
+credentials/
+
+# Build artifacts and bundles
+build/
+
+# Downloaded test/sample files
+downloaded-files/
+
+# Local real_test artifacts (local test data)
+real_test/
+
+# Common secrets
+*.pem
+*.key
+*.env
+id_rsa
+id_rsa.pub
+*.p12
