@@ -1,11 +1,14 @@
 package cmd
 
 import (
+	"bufio"
 	"fmt"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"pipeline/internal/config"
 	"pipeline/internal/pipeline/executor"
@@ -203,6 +206,22 @@ func newPipelineRunCmd() *cobra.Command {
 			if runDebug {
 				b := true
 				execution.Debug = &b
+			}
+
+			// Validate execution mode (must be sandbox or live)
+			mode := strings.ToLower(strings.TrimSpace(execution.Mode))
+			if mode == "" {
+				fmt.Printf("❌ Execution '%s' missing required 'mode' (sandbox|live)\n", execution.Key)
+				os.Exit(1)
+			}
+			if mode != "sandbox" && mode != "live" {
+				fmt.Printf("❌ Execution '%s' has invalid mode '%s' (must be 'sandbox' or 'live')\n", execution.Key, execution.Mode)
+				os.Exit(1)
+			}
+
+			// CLI runs bypass captcha but warn on live
+			if mode == "live" {
+				fmt.Printf("⚠️  WARNING: Running execution '%s' in LIVE mode. This will perform real changes on targets.\n", execution.Key)
 			}
 
 			// Execute
@@ -422,7 +441,10 @@ func showPipelineMenu() {
 		cfg, err := config.LoadAndRenderConfigForPipeline()
 		if err != nil {
 			fmt.Printf("❌ Failed to load config: %v\n", err)
-			fmt.Printf("💡 Run 'pipeline init' to create default configuration\n")
+			// Only suggest `pipeline init` when the config file is missing
+			if strings.Contains(err.Error(), "pipeline.yaml not found") || strings.Contains(err.Error(), "pipeline.yaml not found. Please run 'pipeline init'") {
+				fmt.Printf("💡 Run 'pipeline init' to create default configuration\n")
+			}
 			return
 		}
 
@@ -911,6 +933,49 @@ func generateSSHTempConfig(cfg *config.Config, hostName string) error {
 	return nil
 }
 
+// generateCaptcha creates a simple alphanumeric token of given length
+func generateCaptcha(n int) string {
+	const letters = "abcdefghijklmnopqrstuvwxyz0123456789"
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = letters[r.Intn(len(letters))]
+	}
+	return string(b)
+}
+
+// askCaptcha prompts the user to type the provided token to confirm an action.
+// Returns true if the user types the token correctly within allowed attempts and timeout.
+func askCaptcha(token string, attempts int, timeout time.Duration) bool {
+	reader := bufio.NewReader(os.Stdin)
+	deadline := time.Now().Add(timeout)
+	for try := 1; try <= attempts; try++ {
+		fmt.Printf("\nConfirm Live Execution — please type the following to continue: %s\n", token)
+		fmt.Printf("Attempt %d/%d — Input: ", try, attempts)
+
+		inputCh := make(chan string, 1)
+		go func() {
+			line, _ := reader.ReadString('\n')
+			inputCh <- line
+		}()
+
+		select {
+		case line := <-inputCh:
+			resp := strings.TrimSpace(line)
+			if strings.EqualFold(resp, token) {
+				return true
+			}
+			fmt.Println("❌ Incorrect confirmation token")
+		case <-time.After(time.Until(deadline)):
+			fmt.Println("❌ Confirmation timed out")
+			return false
+		}
+
+		// If attempts remain, continue; otherwise fail
+	}
+	return false
+}
+
 // showExecutionSelectionMenu displays a menu to select and run an execution
 func showExecutionSelectionMenu(cfg *config.Config) {
 	if len(cfg.DirectAccess.Executions) == 0 {
@@ -1070,6 +1135,35 @@ func showExecutionSelectionMenu(cfg *config.Config) {
 
 			// Execute
 			executor := executor.NewExecutor()
+
+			// Validate execution mode presence
+			mode := strings.ToLower(strings.TrimSpace(exec.Mode))
+			if mode == "" {
+				fmt.Printf("❌ Execution '%s' missing required 'mode' (sandbox|live)\n", exec.Key)
+				fmt.Println("\nPress Enter to continue...")
+				fmt.Scanln()
+				return
+			}
+			if mode != "sandbox" && mode != "live" {
+				fmt.Printf("❌ Execution '%s' has invalid mode '%s' (must be 'sandbox' or 'live')\n", exec.Key, exec.Mode)
+				fmt.Println("\nPress Enter to continue...")
+				fmt.Scanln()
+				return
+			}
+
+			// If live, require interactive captcha confirmation
+			if mode == "live" {
+				captcha := generateCaptcha(6)
+				ok := askCaptcha(captcha, 3, 2*time.Minute)
+				if !ok {
+					fmt.Println("❌ Confirmation failed — live execution cancelled")
+					fmt.Println("\nPress Enter to continue...")
+					fmt.Scanln()
+					return
+				}
+				fmt.Println("✅ Confirmation accepted — proceeding with live execution")
+			}
+
 			if err := executor.Execute(pipeline, &exec, vars, exec.Hosts, cfg); err != nil {
 				fmt.Printf("❌ Execution failed: %v\n", err)
 			} else {
