@@ -590,6 +590,19 @@ Invalid executions are rejected with clear error messages:
 ❌ Vars key 'missing-env' not found in vars.yaml
 ```
 
+### Execution Mode (sandbox / live)
+
+Executions now require a `mode` field which must be either `sandbox` or `live`. This is enforced during configuration validation to avoid accidental production runs.
+
+- `sandbox`: Safe mode intended for testing and dry-runs.
+- `live`: Real/production mode intended for operations that affect live systems.
+
+Behavior differences:
+- When using the interactive menu (`pipeline` without args), selecting a `live` execution will prompt for an interactive captcha confirmation (three attempts, two-minute timeout) to reduce accidental live runs.
+- When running from the CLI (`pipeline run <key>`), `live` executions are allowed but will display a prominent warning; CLI runs intentionally bypass the interactive captcha to support automation and CI workflows.
+
+If `mode` is missing or has an invalid value the config loader will reject the configuration with a clear error message indicating the offending execution entry.
+
 ## Debugging
 
 Pipeline supports a small debug facility that you can enable at multiple scopes. The effective debug setting for a running step follows this precedence (highest → lowest):

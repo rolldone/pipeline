@@ -242,7 +242,28 @@ func ValidateConfig(cfg *Config) error {
 		}
 	}
 
-	// No global devsync settings to validate in pipeline mode.
+	// Validate executions: require mode and valid values
+	for i, exec := range cfg.DirectAccess.Executions {
+		if strings.TrimSpace(exec.Name) == "" {
+			validationErrors = append(validationErrors, fmt.Sprintf("Execution %d: name cannot be empty", i+1))
+		}
+		if strings.TrimSpace(exec.Key) == "" {
+			validationErrors = append(validationErrors, fmt.Sprintf("Execution %d: key cannot be empty", i+1))
+		}
+		if strings.TrimSpace(exec.Pipeline) == "" {
+			validationErrors = append(validationErrors, fmt.Sprintf("Execution %d: pipeline cannot be empty", i+1))
+		}
+
+		// Mode is required and must be either sandbox or live
+		mode := strings.ToLower(strings.TrimSpace(exec.Mode))
+		if mode == "" {
+			validationErrors = append(validationErrors, fmt.Sprintf("Execution '%s' (index %d): missing required field 'mode' (must be 'sandbox' or 'live')", exec.Key, i+1))
+		} else if mode != "sandbox" && mode != "live" {
+			validationErrors = append(validationErrors, fmt.Sprintf("Execution '%s' (index %d): invalid mode '%s' (must be 'sandbox' or 'live')", exec.Key, i+1, exec.Mode))
+		}
+	}
+
+    // No global devsync settings to validate in pipeline mode.
 
 	// If there are validation errors, return them
 	if len(validationErrors) > 0 {
