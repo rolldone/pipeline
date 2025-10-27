@@ -1,0 +1,14 @@
+pipeline:
+  name: "local-e2e-transfer"
+  description: "E2E local transfer from /tmp/fromA to /tmp/fromB"
+  jobs:
+    - name: "local-transfer-job"
+      key: "local-transfer-job"
+      mode: "local"
+      steps:
+        - name: "local transfer"
+          type: "file_transfer"
+          mode: "local"
+          source: "/tmp/fromA"
+          destination: "/tmp/fromB"
+          delete_policy: "" # will be set by runner for soft/force runs

@@ -45,7 +45,6 @@ pipeline:
     # Build job - Docker image building
     - name: "build"
       description: "Build Docker image"
-      depends_on: ["prepare"]
       steps:
         - name: "build-image"
           type: "command"
@@ -66,7 +65,6 @@ pipeline:
     # Test job - Run tests in container
     - name: "test"
       description: "Run tests using the built Docker image"
-      depends_on: ["build"]
       steps:
         - name: "run-tests"
           type: "command"
@@ -82,7 +80,6 @@ pipeline:
     # Deploy job - Push image and deploy
     - name: "deploy"
       description: "Deploy the application"
-      depends_on: ["test"]
       steps:
         - name: "login-registry"
           type: "command"

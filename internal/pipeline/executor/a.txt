@@ -1,0 +1,2 @@
+Hello bob!
+This is a rendered template.

@@ -431,7 +431,6 @@ pipeline:
 
     - name: "build"
       mode: "local"        # Run locally
-      depends_on: ["prepare"]
       steps:
         - name: "build-image"
           type: "command"
@@ -440,7 +439,6 @@ pipeline:
 
     - name: "deploy"
       mode: "remote"       # Run via SSH (default)
-      depends_on: ["build"]
       steps:
         - name: "upload-files"
           type: "file_transfer"
@@ -461,7 +459,6 @@ Jobs in pipelines can be configured with execution modes to determine whether st
 |-------|------|---------|-------------|
 | `key` | string | - | Unique key for referencing in executions (optional, falls back to `name`) |
 | `name` | string | - | Unique job identifier |
-| `depends_on` | []string | - | Jobs that must complete before this job runs |
 | `mode` | string | "remote" | Execution mode: `"local"` or `"remote"` |
 | `steps` | []Step | - | Steps to execute in this job |
 
@@ -558,11 +555,9 @@ jobs:
     steps: [...]
   - key: "test"
     name: "Run Tests"
-    depends_on: ["build"]
     steps: [...]
   - key: "deploy"
     name: "Deploy to Production"
-    depends_on: ["test"]
     steps: [...]
 
 executions:
