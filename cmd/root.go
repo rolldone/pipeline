@@ -53,6 +53,7 @@ func newPipelineRunCmd() *cobra.Command {
 	var varOverrides map[string]string
 	var runDebug bool
 	var forceLive bool
+	var hosts []string
 
 	cmd := &cobra.Command{
 		Use:   "run [execution_key]",
@@ -90,6 +91,12 @@ func newPipelineRunCmd() *cobra.Command {
 			// Initialize Jobs slice if nil
 			if execution.Jobs == nil {
 				execution.Jobs = make([]string, 0)
+			}
+
+			// Validate hosts exist in SSH configs
+			// If CLI provided --hosts, override execution hosts from config
+			if len(hosts) > 0 {
+				execution.Hosts = hosts
 			}
 
 			// Validate hosts exist in SSH configs
@@ -264,6 +271,7 @@ func newPipelineRunCmd() *cobra.Command {
 	cmd.Flags().StringToStringVar(&varOverrides, "var", nil, "Override variables (key=value)")
 	cmd.Flags().BoolVar(&runDebug, "debug", false, "Enable debug logging for this run (overrides execution-level setting)")
 	cmd.Flags().BoolVar(&forceLive, "force-live", false, "Force run even if execution.mode == sandbox (override to live)")
+	cmd.Flags().StringSliceVar(&hosts, "hosts", nil, "Override execution hosts (comma-separated or repeat flag)")
 
 	return cmd
 }

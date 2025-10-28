@@ -1060,6 +1060,15 @@ pipeline list
 pipeline run dev
 pipeline run prod
 
+# Override hosts via CLI
+You can override the execution's configured hosts from the CLI using `--hosts` (comma-separated or repeated flag):
+
+```bash
+# Run 'my-exec' but target host1 and host2 instead of the configured hosts
+pipeline run my-exec --hosts host1,host2
+``` 
+
+
 # Override variables via CLI
 pipeline run prod --var DOCKER_TAG=v1.2.3
 pipeline run dev --var DOCKER_TAG=dev-test --var BUILD_ENV=development
