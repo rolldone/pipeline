@@ -601,6 +601,16 @@ Behavior differences:
 - When using the interactive menu (`pipeline` without args), selecting a `live` execution will prompt for an interactive captcha confirmation (three attempts, two-minute timeout) to reduce accidental live runs.
 - When running from the CLI (`pipeline run <key>`), `live` executions are allowed but will display a prominent warning; CLI runs intentionally bypass the interactive captcha to support automation and CI workflows.
 
+CLI override policy:
+- The CLI uses the `mode` defined in the execution entry. To prevent accidental promotion of a `sandbox` execution to `live`, overriding a `sandbox` execution to run as live requires the explicit `--force-live` flag:
+
+```bash
+# Run an execution that is marked sandbox as live (explicit override)
+pipeline run my-exec --force-live
+```
+
+- When `--force-live` is used the CLI will print a strong WARNING and an audit entry is appended to `.sync_temp/logs/override_audit.log` containing timestamp, user, cwd and the full command arguments. This provides an audit trail for intentional overrides.
+
 If `mode` is missing or has an invalid value the config loader will reject the configuration with a clear error message indicating the offending execution entry.
 
 ## Debugging
