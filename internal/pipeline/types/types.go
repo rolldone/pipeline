@@ -5,6 +5,7 @@ type Execution struct {
 	Name      string                 `yaml:"name"`
 	Key       string                 `yaml:"key"`
 	Pipeline  string                 `yaml:"pipeline"`
+	Mode      string                 `yaml:"mode"` // execution mode: "sandbox" or "live" (required)
 	Jobs      []string               `yaml:"jobs,omitempty"`
 	Var       string                 `yaml:"var"`                 // Reference to vars.yaml key (existing system)
 	Variables map[string]interface{} `yaml:"variables,omitempty"` // Direct variables definition (new feature)

@@ -263,7 +263,7 @@ func ValidateConfig(cfg *Config) error {
 		}
 	}
 
-    // No global devsync settings to validate in pipeline mode.
+	// No global devsync settings to validate in pipeline mode.
 
 	// If there are validation errors, return them
 	if len(validationErrors) > 0 {
