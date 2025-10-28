@@ -52,6 +52,7 @@ func Execute() error {
 func newPipelineRunCmd() *cobra.Command {
 	var varOverrides map[string]string
 	var runDebug bool
+	var forceLive bool
 
 	cmd := &cobra.Command{
 		Use:   "run [execution_key]",
@@ -219,8 +220,33 @@ func newPipelineRunCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			// CLI runs bypass captcha but warn on live
-			if mode == "live" {
+			// Handle CLI override policy: execution.Mode comes from config. If it's sandbox,
+			// require --force-live to override to live. If --force-live is used, record an audit entry.
+			if mode == "sandbox" {
+				if !forceLive {
+					fmt.Printf("❌ Execution '%s' is configured as 'sandbox'. To run it as live use --force-live\n", execution.Key)
+					os.Exit(1)
+				}
+
+				// forceLive set: override to live and write audit
+				execution.Mode = "live"
+				fmt.Printf("⚠️  WARNING: --force-live used. Overriding execution '%s' mode from 'sandbox' to 'live'. This will perform real changes.\n", execution.Key)
+
+				// Ensure .sync_temp/logs exists and append audit line
+				logsDir := ".sync_temp/logs"
+				_ = os.MkdirAll(logsDir, 0755)
+				cwd, _ := os.Getwd()
+				user := os.Getenv("USER")
+				auditLine := fmt.Sprintf("%s FORCE-LIVE user=%s execution=%s cwd=%s args=%s\n", time.Now().Format(time.RFC3339), user, execution.Key, cwd, strings.Join(os.Args, " "))
+				auditFile := filepath.Join(logsDir, "override_audit.log")
+				f, err := os.OpenFile(auditFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+				if err == nil {
+					_, _ = f.WriteString(auditLine)
+					_ = f.Close()
+				}
+
+			} else if mode == "live" {
+				// execution is already live; print warning
 				fmt.Printf("⚠️  WARNING: Running execution '%s' in LIVE mode. This will perform real changes on targets.\n", execution.Key)
 			}
 
@@ -237,6 +263,7 @@ func newPipelineRunCmd() *cobra.Command {
 
 	cmd.Flags().StringToStringVar(&varOverrides, "var", nil, "Override variables (key=value)")
 	cmd.Flags().BoolVar(&runDebug, "debug", false, "Enable debug logging for this run (overrides execution-level setting)")
+	cmd.Flags().BoolVar(&forceLive, "force-live", false, "Force run even if execution.mode == sandbox (override to live)")
 
 	return cmd
 }
