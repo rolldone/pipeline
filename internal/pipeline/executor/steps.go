@@ -291,7 +291,18 @@ func (e *Executor) runCommandStep(step *types.Step, job *types.Job, config map[s
 			if len(preview) > 200 {
 				preview = preview[:200] + "..."
 			}
-			fmt.Printf("Running on %s: %s\n", host, preview)
+			// If the SSH client supports an interactive PTY execution path,
+			// the interactive runner will already print a header like
+			// "Running interactively: ...". Avoid duplicating that header by
+			// only printing the host header when the client does NOT implement
+			// the SSHClient interface (i.e., non-interactive path).
+			if client == nil {
+				fmt.Printf("Running on %s: %s\n", host, preview)
+			} else {
+				if _, ok := client.(SSHClient); !ok {
+					fmt.Printf("Running on %s: %s\n", host, preview)
+				}
+			}
 		}
 
 		// Run command with interactive support and timeout
