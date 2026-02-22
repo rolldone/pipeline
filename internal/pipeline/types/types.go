@@ -60,6 +60,7 @@ type Step struct {
 	// rsync-specific fields removed: rsync-based step is deprecated; use `file_transfer` instead.
 
 	Conditions  []Condition `yaml:"conditions,omitempty"`   // conditional execution based on output
+	When        []WhenEntry `yaml:"when,omitempty"`         // condition DSL with grouped all/any support
 	Expect      []Expect    `yaml:"expect,omitempty"`       // interactive prompt responses
 	WorkingDir  string      `yaml:"working_dir,omitempty"`  // override working directory for this step
 	Timeout     int         `yaml:"timeout,omitempty"`      // timeout in seconds (default 0 = unlimited)
@@ -91,6 +92,21 @@ type Condition struct {
 	Action  string `yaml:"action"`         // "continue", "drop", "goto_step", "goto_job", "fail"
 	Step    string `yaml:"step,omitempty"` // target step name for goto_step
 	Job     string `yaml:"job,omitempty"`  // target job name for goto_job
+}
+
+// WhenEntry represents a single `when` clause for step output matching.
+// It can be a leaf (contains/equals/regex) or a logical group (all/any).
+type WhenEntry struct {
+	Contains string `yaml:"contains,omitempty"`
+	Equals   string `yaml:"equals,omitempty"`
+	Regex    string `yaml:"regex,omitempty"`
+
+	Action string `yaml:"action,omitempty"` // "continue", "drop", "goto_step", "goto_job", "fail"
+	Step   string `yaml:"step,omitempty"`   // target step name for goto_step
+	Job    string `yaml:"job,omitempty"`    // target job name for goto_job
+
+	All []WhenEntry `yaml:"all,omitempty"` // grouped AND
+	Any []WhenEntry `yaml:"any,omitempty"` // grouped OR
 }
 
 // Expect represents an expected prompt and response

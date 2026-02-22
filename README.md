@@ -696,6 +696,9 @@ steps:
     conditions:                     # Conditional execution
       - pattern: "5 packets"
         action: "continue"
+    when:                           # Alternative DSL (evaluated after conditions)
+      - contains: "ttl="
+        action: "continue"
 ```
 
 ### Step Configuration Fields
@@ -719,6 +722,7 @@ steps:
 | `working_dir` | string | - | Override working directory for this step |
 | `save_output` | string | - | Save command output to context variable |
 | `conditions` | []Condition | - | Conditional execution based on output |
+| `when` | []WhenEntry | - | Condition DSL (`contains`/`equals`/`regex`, `all`/`any`) |
 | `expect` | []Expect | - | Interactive prompt responses |
 
 ### Command Format Support
@@ -1399,6 +1403,9 @@ Variable interpolation with format `{{VAR_NAME}}` is supported in:
 | `working_dir` | string | Working directory for step |
 | `save_output` | string | Variable name for saving output (supports interpolation) |
 | `conditions[].pattern` | string | Regex pattern for conditional matching |
+| `when[].contains` | string | Substring match value (supports interpolation) |
+| `when[].equals` | string | Trimmed equality match value (supports interpolation) |
+| `when[].regex` | string | Regex match value (supports interpolation) |
 | `expect[].response` | string | Response for interactive prompts |
 
 Example usage in various fields:
@@ -1438,7 +1445,53 @@ steps:
       - pattern: "SUCCESS"
         action: "goto_job"
         job: "success_handler"
+
+### When Condition DSL
+
+In addition to legacy `conditions`, steps can use `when` entries:
+
+- Leaf operators: `contains`, `equals`, `regex`
+- Group operators: `all` (AND), `any` (OR)
+- Actions: `continue`, `drop`, `goto_step`, `goto_job`, `fail`
+
+Evaluation order is:
+1. `conditions` (legacy)
+2. `when` (DSL)
+3. `else_action` (if nothing matched)
+
+Example (`all` / AND):
+
+```yaml
+steps:
+  - name: "check-output"
+    type: "command"
+    commands: ["echo 'alpha:42'"]
+    when:
+      - all:
+          - contains: "alpha"
+          - regex: ":[0-9]+"
+        action: "goto_step"
+        step: "next"
 ```
+
+Example (`any` / OR):
+
+```yaml
+steps:
+  - name: "check-output"
+    type: "command"
+    commands: ["echo 'just alpha'"]
+    when:
+      - any:
+          - contains: "missing"
+          - equals: "just alpha"
+        action: "goto_step"
+        step: "next"
+```
+
+Reference examples in repository:
+- `pipelines/when-groups-all.yaml`
+- `pipelines/when-groups-any.yaml`
 
 ### Condition Actions
 

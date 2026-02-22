@@ -372,6 +372,40 @@ func (e *Executor) checkConditions(step *types.Step, output string, vars types.V
 		}
 	}
 
+	// Evaluate `when` DSL after legacy conditions for backward compatibility.
+	if !conditionMatched {
+		for _, when := range step.When {
+			matched, err := e.evalWhenEntry(when, output, vars)
+			if err != nil {
+				return "", "", fmt.Errorf("invalid when entry in step %s: %v", step.Name, err)
+			}
+
+			if matched {
+				conditionMatched = true
+				switch when.Action {
+				case "continue":
+					continue
+				case "drop":
+					return "drop", "", nil
+				case "goto_step":
+					if when.Step == "" {
+						return "", "", fmt.Errorf("goto_step action requires 'step' field in step %s", step.Name)
+					}
+					return "goto_step", when.Step, nil
+				case "goto_job":
+					if when.Job == "" {
+						return "", "", fmt.Errorf("goto_job action requires 'job' field in step %s", step.Name)
+					}
+					return "goto_job", when.Job, nil
+				case "fail":
+					return "", "", fmt.Errorf("step intentionally failed due to when match")
+				default:
+					return "", "", fmt.Errorf("unknown when action '%s' in step %s", when.Action, step.Name)
+				}
+			}
+		}
+	}
+
 	// If no conditions matched and else_action is specified, use else_action
 	if !conditionMatched && step.ElseAction != "" {
 		switch step.ElseAction {
@@ -397,6 +431,51 @@ func (e *Executor) checkConditions(step *types.Step, output string, vars types.V
 	}
 
 	return "", "", nil
+}
+
+func (e *Executor) evalWhenEntry(when types.WhenEntry, output string, vars types.Vars) (bool, error) {
+	if len(when.All) > 0 {
+		for _, nested := range when.All {
+			matched, err := e.evalWhenEntry(nested, output, vars)
+			if err != nil {
+				return false, err
+			}
+			if !matched {
+				return false, nil
+			}
+		}
+		return true, nil
+	}
+
+	if len(when.Any) > 0 {
+		for _, nested := range when.Any {
+			matched, err := e.evalWhenEntry(nested, output, vars)
+			if err != nil {
+				return false, err
+			}
+			if matched {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+
+	if when.Contains != "" {
+		return strings.Contains(output, e.interpolateString(when.Contains, vars)), nil
+	}
+	if when.Equals != "" {
+		return strings.TrimSpace(output) == strings.TrimSpace(e.interpolateString(when.Equals, vars)), nil
+	}
+	if when.Regex != "" {
+		pattern := e.interpolateString(when.Regex, vars)
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return false, err
+		}
+		return re.MatchString(output), nil
+	}
+
+	return false, nil
 }
 
 // runFileTransferStep uploads/downloads files to/from remote host or copies locally

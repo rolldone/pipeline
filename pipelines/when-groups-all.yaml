@@ -1,0 +1,22 @@
+pipeline:
+  name: "when-groups-all"
+  jobs:
+    - name: "main"
+      steps:
+        - name: "check"
+          type: "command"
+          commands: ["echo 'alpha:42'"]
+          when:
+            - all:
+                - contains: "alpha"
+                - regex: ":[0-9]+"
+              action: "goto_step"
+              step: "done"
+
+        - name: "skip"
+          type: "command"
+          commands: ["echo 'SKIPPED_BY_GOTO' "]
+
+        - name: "done"
+          type: "command"
+          commands: ["echo 'ALL_OK'"]

@@ -1,0 +1,22 @@
+pipeline:
+  name: "when-groups-any"
+  jobs:
+    - name: "main"
+      steps:
+        - name: "check"
+          type: "command"
+          commands: ["echo 'just alpha'"]
+          when:
+            - any:
+                - contains: "missing"
+                - equals: "just alpha"
+              action: "goto_step"
+              step: "done"
+
+        - name: "skip"
+          type: "command"
+          commands: ["echo 'SKIPPED_BY_GOTO'"]
+
+        - name: "done"
+          type: "command"
+          commands: ["echo 'ANY_OK'"]
