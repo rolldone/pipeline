@@ -1445,6 +1445,7 @@ steps:
       - pattern: "SUCCESS"
         action: "goto_job"
         job: "success_handler"
+```
 
 ### When Condition DSL
 
